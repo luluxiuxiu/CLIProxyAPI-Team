@@ -14,6 +14,10 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// GeminiAPIProxyCLIOnly forces Gemini API requests to route only to gemini-cli providers.
+	// When true, antigravity and direct Gemini API key providers are excluded.
+	GeminiAPIProxyCLIOnly bool `yaml:"gemini-api-proxy-cli-only" json:"gemini-api-proxy-cli-only"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 

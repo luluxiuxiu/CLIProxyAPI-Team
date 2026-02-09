@@ -371,7 +371,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -414,7 +414,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -457,7 +457,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(handlerType, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -621,7 +621,7 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(handlerType, modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -650,6 +650,19 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+	}
+
+	if h != nil && h.Cfg != nil && h.Cfg.GeminiAPIProxyCLIOnly && strings.EqualFold(handlerType, "gemini") {
+		filtered := make([]string, 0, len(providers))
+		for _, provider := range providers {
+			if strings.EqualFold(provider, "gemini-cli") {
+				filtered = append(filtered, provider)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("gemini api routing restricted to gemini-cli but none available for model %s", modelName)}
+		}
+		providers = filtered
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
