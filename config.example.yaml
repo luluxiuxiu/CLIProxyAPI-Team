@@ -129,6 +129,19 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# Codex OAuth account model policies
+# codex-account-models:
+#   free:
+#     supported-models:
+#       - "gpt-5.2"
+#       - "gpt-5.2-codex"
+#     # unsupported-models:
+#     #   - "gpt-5.3-codex"
+#   paid:
+#     supported-models:
+#       - "gpt-5.3-codex"
+#     # unsupported-models: []
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url

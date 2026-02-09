@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -794,7 +795,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
-		models = applyExcludedModels(models, excluded)
+		models = s.applyCodexAccountModels(a, authKind, models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
 		models = applyExcludedModels(models, excluded)
@@ -1070,6 +1071,92 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+func applyAllowedModels(models []*ModelInfo, allowed []string) []*ModelInfo {
+	if len(models) == 0 || len(allowed) == 0 {
+		return models
+	}
+
+	patterns := make([]string, 0, len(allowed))
+	for _, item := range allowed {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			patterns = append(patterns, strings.ToLower(trimmed))
+		}
+	}
+	if len(patterns) == 0 {
+		return models
+	}
+
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		if modelID == "" {
+			continue
+		}
+		matched := false
+		for _, pattern := range patterns {
+			if matchWildcard(pattern, modelID) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+func (s *Service) applyCodexAccountModels(auth *coreauth.Auth, authKind string, models []*ModelInfo, excluded []string) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	if strings.EqualFold(strings.TrimSpace(authKind), "apikey") {
+		return applyExcludedModels(models, excluded)
+	}
+	_, planCategory := codexPlanFromAuth(auth)
+	if planCategory != "free" && planCategory != "paid" {
+		return applyExcludedModels(models, excluded)
+	}
+	if s == nil || s.cfg == nil {
+		return applyExcludedModels(models, excluded)
+	}
+	policy := s.cfg.EffectiveCodexPlanModels(planCategory)
+	if len(policy.SupportedModels) > 0 {
+		models = applyAllowedModels(models, policy.SupportedModels)
+	}
+	if len(policy.UnsupportedModels) > 0 {
+		excluded = append(excluded, policy.UnsupportedModels...)
+	}
+	return applyExcludedModels(models, excluded)
+}
+
+func codexPlanFromAuth(auth *coreauth.Auth) (string, string) {
+	if auth == nil {
+		return "", "unknown"
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return "", "unknown"
+	}
+	planType := ""
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["plan_type"].(string); ok {
+			planType = strings.TrimSpace(v)
+		}
+		if planType == "" {
+			if raw, ok := auth.Metadata["id_token"].(string); ok {
+				claims, err := codex.ParseJWTToken(strings.TrimSpace(raw))
+				if err == nil && claims != nil {
+					planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+				}
+			}
+		}
+	}
+	return planType, codex.PlanCategory(planType)
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

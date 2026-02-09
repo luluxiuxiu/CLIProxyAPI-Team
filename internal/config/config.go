@@ -87,6 +87,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CodexAccountModels controls Codex OAuth model availability by account plan.
+	CodexAccountModels CodexAccountModels `yaml:"codex-account-models,omitempty" json:"codex-account-models,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -609,6 +612,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
+
+	// Normalize Codex OAuth account model policies.
+	cfg.SanitizeCodexAccountModels()
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()

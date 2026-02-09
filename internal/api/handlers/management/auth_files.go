@@ -425,7 +425,58 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if plan := h.codexPlanEntry(auth); plan != nil {
+		entry["codex_plan"] = plan
+	}
 	return entry
+}
+
+func (h *Handler) codexPlanEntry(auth *coreauth.Auth) gin.H {
+	if h == nil || h.cfg == nil || auth == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+	planType := codexPlanTypeFromAuth(auth)
+	planCategory := codex.PlanCategory(planType)
+	if planCategory == "unknown" {
+		return nil
+	}
+	entry := gin.H{"plan_category": planCategory}
+	if planType != "" {
+		entry["plan_type"] = planType
+	}
+	policy := h.cfg.EffectiveCodexPlanModels(planCategory)
+	if len(policy.SupportedModels) > 0 || len(policy.UnsupportedModels) > 0 {
+		models := gin.H{}
+		if len(policy.SupportedModels) > 0 {
+			models["supported"] = policy.SupportedModels
+		}
+		if len(policy.UnsupportedModels) > 0 {
+			models["unsupported"] = policy.UnsupportedModels
+		}
+		entry["models"] = models
+	}
+	return entry
+}
+
+func codexPlanTypeFromAuth(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	if v, ok := auth.Metadata["plan_type"].(string); ok {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	if raw, ok := auth.Metadata["id_token"].(string); ok {
+		claims, err := codex.ParseJWTToken(strings.TrimSpace(raw))
+		if err == nil && claims != nil {
+			return strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		}
+	}
+	return ""
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
