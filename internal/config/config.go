@@ -81,6 +81,12 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// CodexWebsockets enables the Codex Responses API websocket transport globally.
+	//
+	// When true, downstream websocket requests (GET /v1/responses) will prefer the upstream websocket
+	// transport without requiring per-credential `websockets: true` under codex-api-key entries.
+	CodexWebsockets bool `yaml:"codex-websockets" json:"codex-websockets"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 

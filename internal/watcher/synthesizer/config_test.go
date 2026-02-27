@@ -265,6 +265,38 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CodexKeys_GlobalWebsockets(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexWebsockets: true,
+			CodexKey: []config.CodexKey{
+				{
+					APIKey:   "codex-key-123",
+					Prefix:   "dev",
+					BaseURL:  "https://api.openai.com",
+					ProxyURL: "http://proxy.local",
+					// Websockets is intentionally false here; global flag should still enable it.
+					Websockets: false,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Attributes["websockets"] != "true" {
+		t.Errorf("expected websockets=true, got %s", auths[0].Attributes["websockets"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

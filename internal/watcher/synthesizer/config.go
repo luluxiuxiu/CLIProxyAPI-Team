@@ -160,7 +160,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
 		}
-		if ck.Websockets {
+		if ck.Websockets || cfg.CodexWebsockets {
 			attrs["websockets"] = "true"
 		}
 		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
