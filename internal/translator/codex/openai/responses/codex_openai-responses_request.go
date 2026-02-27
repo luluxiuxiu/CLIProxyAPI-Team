@@ -27,6 +27,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "generate")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
