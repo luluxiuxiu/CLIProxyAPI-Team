@@ -181,7 +181,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	if !gjson.GetBytes(body, "instructions").Exists() {
@@ -684,11 +683,36 @@ func buildCodexWebsocketRequestBody(body []byte, allowAppend bool) []byte {
 
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
+		if !hasCodexRequiredField(wsReqBody) {
+			wsReqBody, _ = sjson.SetRawBytes(wsReqBody, "input", []byte("[]"))
+		}
 		return wsReqBody
 	}
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
+	if !hasCodexRequiredField(fallback) {
+		fallback, _ = sjson.SetRawBytes(fallback, "input", []byte("[]"))
+	}
 	return fallback
+}
+
+func hasCodexRequiredField(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	if gjson.GetBytes(body, "input").Exists() {
+		return true
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
+		return true
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "prompt").String()) != "" {
+		return true
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "conversation_id").String()) != "" {
+		return true
+	}
+	return false
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
