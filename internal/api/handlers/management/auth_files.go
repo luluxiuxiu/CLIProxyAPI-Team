@@ -996,11 +996,17 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	if h.postAuthHook != nil {
+		if err := h.postAuthHook(ctx, record); err != nil {
+			return "", fmt.Errorf("post-auth hook failed: %w", err)
+		}
+	}
 	return store.Save(ctx, record)
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -1145,6 +1151,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
@@ -1403,6 +1410,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1548,6 +1556,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -1712,6 +1721,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 func (h *Handler) RequestQwenToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Qwen authentication...")
 
@@ -1767,6 +1777,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Kimi authentication...")
 
@@ -1843,6 +1854,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing iFlow authentication...")
 
@@ -2462,4 +2474,13 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// PopulateAuthContext extracts request info and adds it to the context
+func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
+	info := &coreauth.RequestInfo{
+		Query:   c.Request.URL.Query(),
+		Headers: c.Request.Header,
+	}
+	return coreauth.WithRequestInfo(ctx, info)
 }
