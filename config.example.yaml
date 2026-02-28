@@ -27,6 +27,18 @@ codex-websockets: false
 # - Select credentials with higher quota limits first
 codex-quota-auto-refresh-interval: 30
 
+# Usage History configures persistent storage of API usage history in SQLite.
+# This allows tracking API usage over time and analyzing usage patterns.
+usage-history:
+  # Enable toggles persistent storage of usage history.
+  enable: false
+  # DBPath is the path to the SQLite database file. Supports ~ for home directory.
+  # Default is ~/.cli-proxy-api/usage.db
+  db-path: "~/.cli-proxy-api/usage.db"
+  # RetentionDays is the number of days to retain usage history.
+  # Default is 90 days. Set to 0 to disable automatic cleanup.
+  retention-days: 90
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.

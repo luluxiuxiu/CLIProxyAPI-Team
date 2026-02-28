@@ -20,8 +20,40 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
-// GetUsageStatistics returns the in-memory request statistics snapshot.
+// GetUsageStatistics returns the request statistics.
+// If SQLite storage is enabled, it returns statistics from the database.
+// Otherwise, it returns in-memory statistics.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	loggerPlugin := usage.GetLoggerPlugin()
+	
+	// Try to get statistics from SQLite if available
+	if loggerPlugin != nil {
+		db := loggerPlugin.GetSQLiteStore()
+		if db != nil {
+			// Get statistics from database for the last 90 days by default
+			endTime := time.Now()
+			startTime := endTime.AddDate(0, 0, -90)
+			
+			stats, err := db.GetStatistics(startTime, endTime)
+			if err == nil && stats != nil {
+				// Convert database statistics to snapshot format
+				snapshot := usage.StatisticsSnapshot{
+					TotalRequests: stats.TotalRecords,
+					SuccessCount:  stats.TotalRecords - stats.FailedCount,
+					FailureCount:  stats.FailedCount,
+					TotalTokens:   stats.TotalTokens,
+				}
+				c.JSON(http.StatusOK, gin.H{
+					"usage":           snapshot,
+					"failed_requests": stats.FailedCount,
+					"from_database":   true,
+				})
+				return
+			}
+		}
+	}
+	
+	// Fallback to in-memory statistics
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()

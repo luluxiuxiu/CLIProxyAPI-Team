@@ -19,13 +19,14 @@ var statisticsEnabled atomic.Bool
 
 func init() {
 	statisticsEnabled.Store(true)
-	coreusage.RegisterPlugin(NewLoggerPlugin())
+	coreusage.RegisterPlugin(defaultLoggerPlugin)
 }
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
 type LoggerPlugin struct {
 	stats *RequestStatistics
+	db    *UsageSQLiteStore // SQLite store for persistent usage history
 }
 
 // NewLoggerPlugin constructs a new logger plugin instance.
@@ -33,6 +34,16 @@ type LoggerPlugin struct {
 // Returns:
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+
+// SetSQLiteStore sets the SQLite store for persistent usage history.
+func (p *LoggerPlugin) SetSQLiteStore(db *UsageSQLiteStore) {
+	p.db = db
+}
+
+// GetSQLiteStore returns the SQLite store.
+func (p *LoggerPlugin) GetSQLiteStore() *UsageSQLiteStore {
+	return p.db
+}
 
 // HandleUsage implements coreusage.Plugin.
 // It updates the in-memory statistics store whenever a usage record is received.
@@ -48,6 +59,14 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	p.stats.Record(ctx, record)
+
+	// Persist to SQLite if available
+	if p.db != nil {
+		if err := p.db.InsertFromRecord(record); err != nil {
+			// Log error but don't fail the request
+			// log.WithError(err).Debug("Failed to persist usage record")
+		}
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -55,6 +74,11 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
+
+// GetLoggerPlugin returns the logger plugin instance.
+func GetLoggerPlugin() *LoggerPlugin { return defaultLoggerPlugin }
+
+var defaultLoggerPlugin = NewLoggerPlugin()
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {

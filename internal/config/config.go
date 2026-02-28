@@ -64,6 +64,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageHistory configures persistent storage for usage history.
+	UsageHistory UsageHistoryConfig `yaml:"usage-history" json:"usage-history"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -190,6 +193,18 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// UsageHistoryConfig configures persistent storage for usage history.
+type UsageHistoryConfig struct {
+	// Enable toggles persistent storage of usage history.
+	Enable bool `yaml:"enable" json:"enable"`
+	// DBPath is the path to the SQLite database file. Supports ~ for home directory.
+	// Default is ~/.cli-proxy-api/usage.db
+	DBPath string `yaml:"db-path" json:"db-path"`
+	// RetentionDays is the number of days to retain usage history.
+	// Default is 90 days. Set to 0 to disable automatic cleanup.
+	RetentionDays int `yaml:"retention-days" json:"retention-days"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

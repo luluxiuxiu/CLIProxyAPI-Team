@@ -288,6 +288,37 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.codexQuotaManager = quota.NewCodexQuotaManager(refreshInterval)
 
+	// Initialize SQLite store for usage history
+	if cfg.UsageHistory.Enable {
+		dbPath := strings.TrimSpace(cfg.UsageHistory.DBPath)
+		if dbPath == "" {
+			dbPath = "~/.cli-proxy-api/usage.db"
+		}
+		log.Infof("[Server] Initializing usage history SQLite store, path: %s", dbPath)
+		resolvedDBPath, err := usage.ResolveUsageDBPath(dbPath)
+		if err != nil {
+			log.Errorf("[Server] Failed to resolve usage database path: %v", err)
+		} else {
+			retentionDays := cfg.UsageHistory.RetentionDays
+			if retentionDays <= 0 {
+				retentionDays = usage.DefaultUsageDBRetentionDays
+			}
+			log.Infof("[Server] Creating usage SQLite store, resolved path: %s, retention: %d days", resolvedDBPath, retentionDays)
+			db, err := usage.NewUsageSQLiteStore(resolvedDBPath, retentionDays)
+			if err != nil {
+				log.Errorf("[Server] Failed to initialize usage SQLite store: %v", err)
+			} else {
+				// Get the logger plugin and set the SQLite store
+				if loggerPlugin := usage.GetLoggerPlugin(); loggerPlugin != nil {
+					loggerPlugin.SetSQLiteStore(db)
+					log.Infof("[Server] Usage history enabled and connected to logger plugin, database: %s, retention: %d days", resolvedDBPath, retentionDays)
+				} else {
+					log.Warnf("[Server] Logger plugin is nil, usage data will not be persisted")
+				}
+			}
+		}
+	}
+
 	// Setup routes
 	s.setupRoutes()
 
@@ -856,6 +887,15 @@ func (s *Server) Stop(ctx context.Context) error {
 	// Stop Codex quota manager
 	if s.codexQuotaManager != nil {
 		s.codexQuotaManager.Stop()
+	}
+
+	// Close usage SQLite store
+	if loggerPlugin := usage.GetLoggerPlugin(); loggerPlugin != nil {
+		if db := loggerPlugin.GetSQLiteStore(); db != nil {
+			if err := db.Close(); err != nil {
+				log.WithError(err).Debug("Failed to close usage SQLite store")
+			}
+		}
 	}
 
 	// Shutdown the HTTP server.

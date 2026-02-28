@@ -48,3 +48,6 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Terminal Paste Image folder
+.cp-images/

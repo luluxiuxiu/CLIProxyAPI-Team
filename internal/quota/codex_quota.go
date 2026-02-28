@@ -1,5 +1,5 @@
 // Package quota provides quota management functionality for various AI providers.
-// It includes Codex quota caching, refreshing, and routing based on quota availability.
+// It includes Codex quota caching and routing based on quota availability.
 package quota
 
 import (
@@ -47,10 +47,10 @@ type CodexQuotaInfo struct {
 
 // RateLimitInfo represents rate limit details for a specific window.
 type RateLimitInfo struct {
-	Allowed       bool            `json:"allowed"`
-	LimitReached  bool            `json:"limit_reached"`
-	PrimaryWindow *LimitWindow    `json:"primary_window,omitempty"`
-	SecondaryWindow *LimitWindow  `json:"secondary_window,omitempty"`
+	Allowed      bool          `json:"allowed"`
+	LimitReached bool          `json:"limit_reached"`
+	PrimaryWindow   *LimitWindow `json:"primary_window,omitempty"`
+	SecondaryWindow *LimitWindow `json:"secondary_window,omitempty"`
 }
 
 // LimitWindow represents a rate limit window.
@@ -270,13 +270,11 @@ func (m *CodexQuotaManager) SelectBestAuthByQuota(authIndexes []string) string {
 	for _, authIndex := range authIndexes {
 		entry, exists := m.cache[authIndex]
 		if !exists || entry.QuotaInfo == nil {
-			// No quota info, skip this auth
 			continue
 		}
 
 		quota := entry.QuotaInfo
 		if quota.RateLimit == nil || !quota.RateLimit.Allowed {
-			// Not allowed, skip
 			continue
 		}
 
@@ -320,7 +318,6 @@ func (m *CodexQuotaManager) SelectBestAuthByQuota(authIndexes []string) string {
 		}
 	}
 
-	// If no quota info available, return the first auth
 	if bestAuth == "" && len(authIndexes) > 0 {
 		return authIndexes[0]
 	}
