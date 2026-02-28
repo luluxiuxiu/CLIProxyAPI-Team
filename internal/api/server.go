@@ -278,7 +278,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
-	s.mgmt.SetCodexQuotaManager(s.codexQuotaManager)
 	s.localPassword = optionState.localPassword
 
 	// Initialize Codex quota manager
@@ -287,6 +286,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		refreshInterval = quota.DefaultCodexQuotaRefreshInterval
 	}
 	s.codexQuotaManager = quota.NewCodexQuotaManager(refreshInterval)
+	s.mgmt.SetCodexQuotaManager(s.codexQuotaManager)
 
 	// Initialize SQLite store for usage history
 	if cfg.UsageHistory.Enable {
@@ -1055,6 +1055,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			// Stop old manager and start new one
 			s.codexQuotaManager.Stop()
 			s.codexQuotaManager = quota.NewCodexQuotaManager(newInterval)
+			if s.mgmt != nil {
+				s.mgmt.SetCodexQuotaManager(s.codexQuotaManager)
+			}
 			if s.handlers != nil && s.handlers.AuthManager != nil {
 				s.codexQuotaManager.Start(context.Background(), &codexQuotaFetcherImpl{
 					authManager: s.handlers.AuthManager,
