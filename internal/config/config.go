@@ -87,6 +87,11 @@ type Config struct {
 	// transport without requiring per-credential `websockets: true` under codex-api-key entries.
 	CodexWebsockets bool `yaml:"codex-websockets" json:"codex-websockets"`
 
+	// CodexQuotaAutoRefreshInterval specifies the interval (in minutes) for automatically
+	// refreshing Codex quota information. When set to <= 0, automatic quota refresh is disabled.
+	// Default is 30 minutes.
+	CodexQuotaAutoRefreshInterval int `yaml:"codex-quota-auto-refresh-interval" json:"codex-quota-auto-refresh-interval"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 

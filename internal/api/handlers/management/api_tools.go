@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -133,6 +134,24 @@ func (h *Handler) APICall(c *gin.Context) {
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
+	// Check if this is a Codex quota request and if we have cached quota data
+	isCodexQuotaRequest := strings.Contains(strings.ToLower(urlStr), "/backend-api/wham/usage")
+	if isCodexQuotaRequest && h.codexQuotaManager != nil && authIndex != "" {
+		if cachedQuota := h.codexQuotaManager.GetQuota(authIndex); cachedQuota != nil && !cachedQuota.IsExpired() {
+			// Return cached quota data
+			quotaJSON, errMarshal := json.Marshal(cachedQuota.QuotaInfo)
+			if errMarshal == nil {
+				log.Debugf("Codex quota cache hit for auth %s", authIndex)
+				c.JSON(http.StatusOK, apiCallResponse{
+					StatusCode: http.StatusOK,
+					Header:     map[string][]string{"Content-Type": {"application/json"}, "X-Codex-Quota-Cached": {"true"}},
+					Body:       string(quotaJSON),
+				})
+				return
+			}
+		}
+	}
+
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
@@ -209,11 +228,51 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	// If this is a successful Codex quota response, update the cache
+	if isCodexQuotaRequest && resp.StatusCode == http.StatusOK && h.codexQuotaManager != nil {
+		var quotaInfo quota.CodexQuotaInfo
+		if errUnmarshal := json.Unmarshal(respBody, &quotaInfo); errUnmarshal == nil {
+			// Try to get auth index from request or response
+			authIndexToUse := authIndex
+			accountIDToUse := authIndex
+
+			// If auth was provided, use its index
+			if auth != nil {
+				auth.EnsureIndex()
+				authIndexToUse = auth.Index
+				if quotaInfo.AccountID != "" {
+					accountIDToUse = quotaInfo.AccountID
+				}
+			} else if quotaInfo.AccountID != "" {
+				// If no auth provided but response has account_id, try to find matching auth
+				authIndexToUse = quotaInfo.AccountID
+				accountIDToUse = quotaInfo.AccountID
+			}
+
+			// Only update cache if we have some identifier
+			if authIndexToUse != "" {
+				accessToken := ""
+				if auth != nil {
+					accessToken = tokenValueForAuth(auth)
+				}
+				h.codexQuotaManager.UpdateCache(authIndexToUse, accountIDToUse, &quotaInfo, accessToken)
+				log.Debugf("Codex quota cache updated for auth %s (from %s)", authIndexToUse, sourceStr(auth != nil))
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func sourceStr(hasAuth bool) string {
+	if hasAuth {
+		return "auth_index"
+	}
+	return "api_call"
 }
 
 func firstNonEmptyString(values ...*string) string {

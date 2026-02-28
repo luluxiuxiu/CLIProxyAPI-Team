@@ -428,6 +428,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if plan := h.codexPlanEntry(auth); plan != nil {
 		entry["codex_plan"] = plan
 	}
+	if quotaInfo := h.getCodexQuotaInfo(auth); quotaInfo != nil {
+		entry["codex_quota"] = quotaInfo
+	}
 	return entry
 }
 
@@ -2483,4 +2486,92 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 		Headers: c.Request.Header,
 	}
 	return coreauth.WithRequestInfo(ctx, info)
+}
+
+// getCodexQuotaInfo retrieves cached quota info for a Codex auth entry.
+func (h *Handler) getCodexQuotaInfo(auth *coreauth.Auth) gin.H {
+	if h == nil || h.codexQuotaManager == nil || auth == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil
+	}
+
+	auth.EnsureIndex()
+	cached := h.codexQuotaManager.GetQuota(auth.Index)
+	if cached == nil || cached.QuotaInfo == nil {
+		return nil
+	}
+
+	quotaInfo := cached.QuotaInfo
+	result := gin.H{
+		"plan_type": quotaInfo.PlanType,
+		"email":     quotaInfo.Email,
+	}
+
+	if quotaInfo.RateLimit != nil {
+		rateLimit := gin.H{
+			"allowed":       quotaInfo.RateLimit.Allowed,
+			"limit_reached": quotaInfo.RateLimit.LimitReached,
+		}
+		if quotaInfo.RateLimit.PrimaryWindow != nil {
+			window := gin.H{
+				"used_percent":         quotaInfo.RateLimit.PrimaryWindow.UsedPercent,
+				"limit_window_seconds": quotaInfo.RateLimit.PrimaryWindow.LimitWindowSeconds,
+				"reset_after_seconds":  quotaInfo.RateLimit.PrimaryWindow.ResetAfterSeconds,
+				"reset_at":             quotaInfo.RateLimit.PrimaryWindow.ResetAt,
+			}
+			rateLimit["primary_window"] = window
+		}
+		if quotaInfo.RateLimit.SecondaryWindow != nil {
+			window := gin.H{
+				"used_percent":         quotaInfo.RateLimit.SecondaryWindow.UsedPercent,
+				"limit_window_seconds": quotaInfo.RateLimit.SecondaryWindow.LimitWindowSeconds,
+				"reset_after_seconds":  quotaInfo.RateLimit.SecondaryWindow.ResetAfterSeconds,
+				"reset_at":             quotaInfo.RateLimit.SecondaryWindow.ResetAt,
+			}
+			rateLimit["secondary_window"] = window
+		}
+		result["rate_limit"] = rateLimit
+	}
+
+	if quotaInfo.CodeReviewRateLimit != nil {
+		codeReview := gin.H{
+			"allowed":       quotaInfo.CodeReviewRateLimit.Allowed,
+			"limit_reached": quotaInfo.CodeReviewRateLimit.LimitReached,
+		}
+		if quotaInfo.CodeReviewRateLimit.PrimaryWindow != nil {
+			window := gin.H{
+				"used_percent":         quotaInfo.CodeReviewRateLimit.PrimaryWindow.UsedPercent,
+				"limit_window_seconds": quotaInfo.CodeReviewRateLimit.PrimaryWindow.LimitWindowSeconds,
+				"reset_after_seconds":  quotaInfo.CodeReviewRateLimit.PrimaryWindow.ResetAfterSeconds,
+				"reset_at":             quotaInfo.CodeReviewRateLimit.PrimaryWindow.ResetAt,
+			}
+			codeReview["primary_window"] = window
+		}
+		if quotaInfo.CodeReviewRateLimit.SecondaryWindow != nil {
+			window := gin.H{
+				"used_percent":         quotaInfo.CodeReviewRateLimit.SecondaryWindow.UsedPercent,
+				"limit_window_seconds": quotaInfo.CodeReviewRateLimit.SecondaryWindow.LimitWindowSeconds,
+				"reset_after_seconds":  quotaInfo.CodeReviewRateLimit.SecondaryWindow.ResetAfterSeconds,
+				"reset_at":             quotaInfo.CodeReviewRateLimit.SecondaryWindow.ResetAt,
+			}
+			codeReview["secondary_window"] = window
+		}
+		result["code_review_rate_limit"] = codeReview
+	}
+
+	if quotaInfo.Promo != nil {
+		result["promo"] = gin.H{
+			"campaign_id": quotaInfo.Promo.CampaignID,
+			"message":     quotaInfo.Promo.Message,
+		}
+	}
+
+	// Add cache metadata
+	result["cached"] = true
+	result["fetched_at"] = cached.FetchedAt
+	result["expires_at"] = cached.ExpiresAt
+
+	return result
 }

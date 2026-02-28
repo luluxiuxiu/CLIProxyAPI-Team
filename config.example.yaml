@@ -11,6 +11,22 @@ tls:
   cert: ""
   key: ""
 
+# Codex Websockets enables the Codex Responses API websocket transport globally.
+#
+# When true, downstream websocket requests (GET /v1/responses) will prefer the upstream websocket
+# transport without requiring per-credential `websockets: true` under codex-api-key entries.
+codex-websockets: false
+
+# Codex Quota Auto Refresh Interval specifies the interval (in minutes) for automatically
+# refreshing Codex quota information from the upstream API.
+# When set to <= 0, automatic quota refresh is disabled.
+# Default is 30 minutes.
+# The quota information is used to:
+# - Cache quota data to avoid repeated API calls
+# - Enable intelligent routing based on quota availability for WebSocket requests
+# - Select credentials with higher quota limits first
+codex-quota-auto-refresh-interval: 30
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.

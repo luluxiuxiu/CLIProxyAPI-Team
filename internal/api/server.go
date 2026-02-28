@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -36,6 +37,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -163,6 +165,9 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// codexQuotaManager manages Codex quota caching and periodic refresh.
+	codexQuotaManager *quota.CodexQuotaManager
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -273,7 +278,15 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
+	s.mgmt.SetCodexQuotaManager(s.codexQuotaManager)
 	s.localPassword = optionState.localPassword
+
+	// Initialize Codex quota manager
+	refreshInterval := time.Duration(cfg.CodexQuotaAutoRefreshInterval) * time.Minute
+	if refreshInterval <= 0 {
+		refreshInterval = quota.DefaultCodexQuotaRefreshInterval
+	}
+	s.codexQuotaManager = quota.NewCodexQuotaManager(refreshInterval)
 
 	// Setup routes
 	s.setupRoutes()
@@ -311,6 +324,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: engine,
+	}
+
+	// Start Codex quota auto-refresh
+	if s.codexQuotaManager != nil && authManager != nil {
+		s.codexQuotaManager.Start(context.Background(), &codexQuotaFetcherImpl{
+			authManager: authManager,
+			cfg:         cfg,
+		})
 	}
 
 	return s
@@ -832,6 +853,11 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Stop Codex quota manager
+	if s.codexQuotaManager != nil {
+		s.codexQuotaManager.Stop()
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
@@ -974,6 +1000,30 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
 	}
 
+	// Update Codex quota manager if refresh interval changed
+	if s.codexQuotaManager != nil {
+		oldInterval := time.Duration(oldCfg.CodexQuotaAutoRefreshInterval) * time.Minute
+		if oldInterval <= 0 {
+			oldInterval = quota.DefaultCodexQuotaRefreshInterval
+		}
+		newInterval := time.Duration(cfg.CodexQuotaAutoRefreshInterval) * time.Minute
+		if newInterval <= 0 {
+			newInterval = quota.DefaultCodexQuotaRefreshInterval
+		}
+		if oldInterval != newInterval {
+			log.Infof("Codex quota refresh interval changed from %v to %v", oldInterval, newInterval)
+			// Stop old manager and start new one
+			s.codexQuotaManager.Stop()
+			s.codexQuotaManager = quota.NewCodexQuotaManager(newInterval)
+			if s.handlers != nil && s.handlers.AuthManager != nil {
+				s.codexQuotaManager.Start(context.Background(), &codexQuotaFetcherImpl{
+					authManager: s.handlers.AuthManager,
+					cfg:         cfg,
+				})
+			}
+		}
+	}
+
 	// Notify Amp module only when Amp config has changed.
 	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)
 	if ampConfigChanged {
@@ -1053,4 +1103,64 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+// codexQuotaFetcherImpl implements quota.QuotaFetcher for Codex auth entries.
+type codexQuotaFetcherImpl struct {
+	authManager *auth.Manager
+	cfg         *config.Config
+}
+
+func (f *codexQuotaFetcherImpl) ListCodexAuths() []quota.CodexAuthEntry {
+	if f.authManager == nil {
+		return nil
+	}
+
+	auths := f.authManager.List()
+	var result []quota.CodexAuthEntry
+
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(auth.Provider, "codex") {
+			continue
+		}
+		if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			continue
+		}
+
+		// Get access token
+		accessToken := ""
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["access_token"].(string); ok {
+				accessToken = strings.TrimSpace(v)
+			}
+		}
+		if accessToken == "" {
+			continue
+		}
+
+		// Get account ID
+		accountID := ""
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = strings.TrimSpace(v)
+			}
+		}
+
+		// Get proxy URL
+		proxyURL := strings.TrimSpace(auth.ProxyURL)
+
+		auth.EnsureIndex()
+		result = append(result, quota.CodexAuthEntry{
+			AuthIndex:   auth.Index,
+			AccountID:   accountID,
+			AccessToken: accessToken,
+			ProxyURL:    proxyURL,
+		})
+	}
+
+	return result
+}
+
+func (f *codexQuotaFetcherImpl) FetchQuota(ctx context.Context, auth quota.CodexAuthEntry) (*quota.CodexQuotaInfo, error) {
+	return quota.FetchQuotaForAuth(ctx, auth.AccessToken, auth.AccountID, auth.ProxyURL)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -48,6 +49,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	codexQuotaManager   *quota.CodexQuotaManager
 }
 
 // NewHandler creates a new management handler instance.
@@ -133,6 +135,9 @@ func (h *Handler) SetLogDirectory(dir string) {
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
 }
+
+// SetCodexQuotaManager sets the Codex quota manager for caching and periodic refresh.
+func (h *Handler) SetCodexQuotaManager(manager *quota.CodexQuotaManager) { h.codexQuotaManager = manager }
 
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
