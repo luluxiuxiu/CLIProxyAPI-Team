@@ -256,6 +256,7 @@ func (h *Handler) APICall(c *gin.Context) {
 					accessToken = tokenValueForAuth(auth)
 				}
 				h.codexQuotaManager.UpdateCache(authIndexToUse, accountIDToUse, &quotaInfo, accessToken)
+				h.persistCodexQuotaSnapshot(c.Request.Context(), auth, authIndexToUse, accountIDToUse, accessToken, &quotaInfo)
 				log.Debugf("Codex quota cache updated for auth %s (from %s)", authIndexToUse, sourceStr(auth != nil))
 			}
 		}
@@ -273,6 +274,45 @@ func sourceStr(hasAuth bool) string {
 		return "auth_index"
 	}
 	return "api_call"
+}
+
+func (h *Handler) persistCodexQuotaSnapshot(ctx context.Context, auth *coreauth.Auth, authIndex, accountID, accessToken string, quotaInfo *quota.CodexQuotaInfo) {
+	if h == nil || h.authManager == nil || h.codexQuotaManager == nil || quotaInfo == nil {
+		return
+	}
+	target := auth
+	if target == nil {
+		target = h.authByIndex(authIndex)
+	}
+	if target == nil {
+		return
+	}
+
+	target.EnsureIndex()
+	entry := h.codexQuotaManager.GetQuota(target.Index)
+	if entry == nil || entry.QuotaInfo == nil {
+		entry = &quota.CodexQuotaCacheEntry{
+			QuotaInfo:   quotaInfo,
+			FetchedAt:   time.Now(),
+			ExpiresAt:   time.Now().Add(quota.CodexQuotaCacheExpiry),
+			AccountID:   strings.TrimSpace(accountID),
+			AccessToken: strings.TrimSpace(accessToken),
+		}
+	}
+
+	clone := target.Clone()
+	clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
+	updated, errUpdate := h.authManager.Update(ctx, clone)
+	if errUpdate != nil {
+		log.WithError(errUpdate).Debugf("Codex quota persistence failed for auth %s", target.Index)
+		return
+	}
+
+	path := ""
+	if updated != nil && updated.Attributes != nil {
+		path = strings.TrimSpace(updated.Attributes["path"])
+	}
+	log.Infof("Codex quota snapshot persisted: auth_index=%s path=%s", target.Index, path)
 }
 
 func firstNonEmptyString(values ...*string) string {

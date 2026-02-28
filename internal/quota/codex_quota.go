@@ -26,7 +26,18 @@ const (
 
 	// CodexUsageEndpoint is the default endpoint for querying Codex quota.
 	CodexUsageEndpoint = "https://chatgpt.com/backend-api/wham/usage"
+
+	// CodexQuotaMetadataKey is the auth metadata key used for persisted codex quota cache.
+	CodexQuotaMetadataKey = "codex_quota_cache"
 )
+
+type persistedCodexQuota struct {
+	QuotaInfo   *CodexQuotaInfo `json:"quota_info"`
+	FetchedAt   time.Time       `json:"fetched_at"`
+	ExpiresAt   time.Time       `json:"expires_at"`
+	AccountID   string          `json:"account_id,omitempty"`
+	AccessToken string          `json:"access_token,omitempty"`
+}
 
 // CodexQuotaInfo represents the quota information returned by the Codex usage endpoint.
 type CodexQuotaInfo struct {
@@ -47,18 +58,18 @@ type CodexQuotaInfo struct {
 
 // RateLimitInfo represents rate limit details for a specific window.
 type RateLimitInfo struct {
-	Allowed      bool          `json:"allowed"`
-	LimitReached bool          `json:"limit_reached"`
+	Allowed         bool         `json:"allowed"`
+	LimitReached    bool         `json:"limit_reached"`
 	PrimaryWindow   *LimitWindow `json:"primary_window,omitempty"`
 	SecondaryWindow *LimitWindow `json:"secondary_window,omitempty"`
 }
 
 // LimitWindow represents a rate limit window.
 type LimitWindow struct {
-	UsedPercent      int   `json:"used_percent"`
+	UsedPercent        int   `json:"used_percent"`
 	LimitWindowSeconds int64 `json:"limit_window_seconds"`
-	ResetAfterSeconds int64 `json:"reset_after_seconds"`
-	ResetAt          int64 `json:"reset_at"` // Unix timestamp
+	ResetAfterSeconds  int64 `json:"reset_after_seconds"`
+	ResetAt            int64 `json:"reset_at"` // Unix timestamp
 }
 
 // PromoInfo contains promotional campaign information.
@@ -245,6 +256,99 @@ func (m *CodexQuotaManager) ClearCache() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cache = make(map[string]*CodexQuotaCacheEntry)
+}
+
+// RestoreCache restores a cache entry for a given auth index when the entry is still valid.
+func (m *CodexQuotaManager) RestoreCache(authIndex string, entry *CodexQuotaCacheEntry) bool {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" || entry == nil || entry.QuotaInfo == nil {
+		return false
+	}
+
+	if entry.ExpiresAt.IsZero() {
+		entry.ExpiresAt = entry.FetchedAt.Add(CodexQuotaCacheExpiry)
+	}
+	if !entry.ExpiresAt.IsZero() && time.Now().After(entry.ExpiresAt) {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, exists := m.cache[authIndex]; exists && current != nil {
+		if !current.FetchedAt.IsZero() && current.FetchedAt.After(entry.FetchedAt) {
+			return false
+		}
+	}
+
+	m.cache[authIndex] = &CodexQuotaCacheEntry{
+		QuotaInfo:   entry.QuotaInfo,
+		FetchedAt:   entry.FetchedAt,
+		ExpiresAt:   entry.ExpiresAt,
+		AccountID:   entry.AccountID,
+		AccessToken: entry.AccessToken,
+	}
+	return true
+}
+
+// PersistQuotaToMetadata writes codex quota cache entry into auth metadata.
+func PersistQuotaToMetadata(metadata map[string]any, entry *CodexQuotaCacheEntry) map[string]any {
+	if entry == nil || entry.QuotaInfo == nil {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	payload := persistedCodexQuota{
+		QuotaInfo:   entry.QuotaInfo,
+		FetchedAt:   entry.FetchedAt,
+		ExpiresAt:   entry.ExpiresAt,
+		AccountID:   strings.TrimSpace(entry.AccountID),
+		AccessToken: strings.TrimSpace(entry.AccessToken),
+	}
+	if payload.FetchedAt.IsZero() {
+		payload.FetchedAt = time.Now()
+	}
+	if payload.ExpiresAt.IsZero() {
+		payload.ExpiresAt = payload.FetchedAt.Add(CodexQuotaCacheExpiry)
+	}
+	metadata[CodexQuotaMetadataKey] = payload
+	return metadata
+}
+
+// ReadQuotaFromMetadata extracts codex quota cache entry from auth metadata.
+func ReadQuotaFromMetadata(metadata map[string]any) (*CodexQuotaCacheEntry, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	raw, ok := metadata[CodexQuotaMetadataKey]
+	if !ok || raw == nil {
+		return nil, false
+	}
+
+	encoded, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return nil, false
+	}
+	var payload persistedCodexQuota
+	if errUnmarshal := json.Unmarshal(encoded, &payload); errUnmarshal != nil {
+		return nil, false
+	}
+	if payload.QuotaInfo == nil {
+		return nil, false
+	}
+	if payload.ExpiresAt.IsZero() {
+		if payload.FetchedAt.IsZero() {
+			payload.FetchedAt = time.Now()
+		}
+		payload.ExpiresAt = payload.FetchedAt.Add(CodexQuotaCacheExpiry)
+	}
+	return &CodexQuotaCacheEntry{
+		QuotaInfo:   payload.QuotaInfo,
+		FetchedAt:   payload.FetchedAt,
+		ExpiresAt:   payload.ExpiresAt,
+		AccountID:   strings.TrimSpace(payload.AccountID),
+		AccessToken: strings.TrimSpace(payload.AccessToken),
+	}, true
 }
 
 // SelectBestAuthByQuota selects the best auth index based on quota priority.

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -191,6 +192,103 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
+func codexQuotaInfoFromAuth(auth *Auth) *quota.CodexQuotaInfo {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	entry, ok := quota.ReadQuotaFromMetadata(auth.Metadata)
+	if !ok || entry == nil || entry.QuotaInfo == nil {
+		return nil
+	}
+	if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(time.Now()) {
+		return nil
+	}
+	return entry.QuotaInfo
+}
+
+func betterCodexQuota(candidate, best *quota.CodexQuotaInfo) bool {
+	if candidate == nil || candidate.RateLimit == nil {
+		return false
+	}
+	if best == nil || best.RateLimit == nil {
+		return true
+	}
+	if !candidate.RateLimit.LimitReached && best.RateLimit.LimitReached {
+		return true
+	}
+	if candidate.RateLimit.LimitReached && !best.RateLimit.LimitReached {
+		return false
+	}
+
+	candidateUsed := -1
+	if candidate.RateLimit.PrimaryWindow != nil {
+		candidateUsed = candidate.RateLimit.PrimaryWindow.UsedPercent
+	}
+	bestUsed := -1
+	if best.RateLimit.PrimaryWindow != nil {
+		bestUsed = best.RateLimit.PrimaryWindow.UsedPercent
+	}
+	if candidateUsed >= 0 && bestUsed >= 0 {
+		if candidateUsed < bestUsed {
+			return true
+		}
+		if candidateUsed > bestUsed {
+			return false
+		}
+	}
+
+	if candidate.RateLimit.PrimaryWindow != nil && best.RateLimit.PrimaryWindow != nil {
+		if candidate.RateLimit.PrimaryWindow.ResetAt < best.RateLimit.PrimaryWindow.ResetAt {
+			return true
+		}
+	}
+	return false
+}
+
+func preferCodexQuotaAuths(available []*Auth) []*Auth {
+	if len(available) <= 1 {
+		return available
+	}
+
+	bestAuth := ""
+	var bestQuota *quota.CodexQuotaInfo
+	tie := make([]*Auth, 0, 2)
+	for i := 0; i < len(available); i++ {
+		candidate := available[i]
+		quotaInfo := codexQuotaInfoFromAuth(candidate)
+		if quotaInfo == nil || quotaInfo.RateLimit == nil || !quotaInfo.RateLimit.Allowed {
+			continue
+		}
+		if bestQuota == nil {
+			bestQuota = quotaInfo
+			bestAuth = candidate.ID
+			tie = []*Auth{candidate}
+			continue
+		}
+		if betterCodexQuota(quotaInfo, bestQuota) {
+			bestQuota = quotaInfo
+			bestAuth = candidate.ID
+			tie = []*Auth{candidate}
+			continue
+		}
+		if !betterCodexQuota(bestQuota, quotaInfo) {
+			tie = append(tie, candidate)
+		}
+	}
+
+	if bestQuota == nil {
+		return available
+	}
+	if len(tie) == 0 {
+		for i := 0; i < len(available); i++ {
+			if available[i] != nil && available[i].ID == bestAuth {
+				return []*Auth{available[i]}
+			}
+		}
+	}
+	return tie
+}
+
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -260,6 +358,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		available = preferCodexQuotaAuths(available)
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -359,6 +460,9 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		available = preferCodexQuotaAuths(available)
+	}
 	return available[0], nil
 }
 

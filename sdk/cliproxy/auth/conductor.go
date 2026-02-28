@@ -1847,7 +1847,10 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	path, err := m.store.Save(ctx, auth)
+	if err == nil && strings.TrimSpace(path) != "" {
+		log.Debugf("auth state persisted: provider=%s id=%s path=%s", strings.TrimSpace(auth.Provider), strings.TrimSpace(auth.ID), strings.TrimSpace(path))
+	}
 	return err
 }
 

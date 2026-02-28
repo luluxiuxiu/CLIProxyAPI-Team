@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -275,6 +275,88 @@ func (s *UsageSQLiteStore) GetByDateRange(startTime, endTime time.Time, limit, o
 	return s.scanRows(rows)
 }
 
+// BuildStatisticsSnapshot builds a full StatisticsSnapshot from SQLite records.
+// It preserves the same response shape as in-memory aggregation, including
+// per-api/per-model details and day/hour breakdowns.
+func (s *UsageSQLiteStore) BuildStatisticsSnapshot(startTime, endTime time.Time) (StatisticsSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT
+		api_key, model, source, auth_index,
+		input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+		failed, requested_at
+	FROM usage_records
+	WHERE requested_at >= ? AND requested_at <= ?
+	ORDER BY requested_at ASC
+	`
+
+	rows, err := s.db.Query(query, startTime.Unix(), endTime.Unix())
+	if err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("failed to query usage records for snapshot: %w", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	stats := NewRequestStatistics()
+	for rows.Next() {
+		var (
+			apiKey          string
+			model           string
+			source          string
+			authIndex       string
+			inputTokens     int64
+			outputTokens    int64
+			reasoningTokens int64
+			cachedTokens    int64
+			totalTokens     int64
+			failed          bool
+			requestedAtUnix int64
+		)
+
+		err := rows.Scan(
+			&apiKey,
+			&model,
+			&source,
+			&authIndex,
+			&inputTokens,
+			&outputTokens,
+			&reasoningTokens,
+			&cachedTokens,
+			&totalTokens,
+			&failed,
+			&requestedAtUnix,
+		)
+		if err != nil {
+			return StatisticsSnapshot{}, fmt.Errorf("failed to scan usage record for snapshot: %w", err)
+		}
+
+		stats.Record(nil, coreusage.Record{
+			APIKey:    apiKey,
+			Model:     model,
+			Source:    source,
+			AuthIndex: authIndex,
+			Detail: coreusage.Detail{
+				InputTokens:     inputTokens,
+				OutputTokens:    outputTokens,
+				ReasoningTokens: reasoningTokens,
+				CachedTokens:    cachedTokens,
+				TotalTokens:     totalTokens,
+			},
+			Failed:      failed,
+			RequestedAt: time.Unix(requestedAtUnix, 0),
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("failed to iterate usage records for snapshot: %w", err)
+	}
+
+	return stats.Snapshot(), nil
+}
+
 // GetStatistics retrieves usage statistics for a specific time range.
 func (s *UsageSQLiteStore) GetStatistics(startTime, endTime time.Time) (*UsageStatistics, error) {
 	s.mu.RLock()
@@ -515,28 +597,28 @@ func (s *UsageSQLiteStore) scanRows(rows *sql.Rows) ([]UsageRecord, error) {
 
 // UsageStatistics represents aggregated usage statistics.
 type UsageStatistics struct {
-	StartTime           time.Time `json:"start_time"`
-	EndTime             time.Time `json:"end_time"`
-	TotalRecords        int64     `json:"total_records"`
-	UniqueAPIKeys       int64     `json:"unique_api_keys"`
-	UniqueModels        int64     `json:"unique_models"`
-	TotalTokens         int64     `json:"total_tokens"`
-	TotalInputTokens    int64     `json:"total_input_tokens"`
-	TotalOutputTokens   int64     `json:"total_output_tokens"`
-	TotalReasoningTokens int64    `json:"total_reasoning_tokens"`
-	FailedCount         int64     `json:"failed_count"`
+	StartTime            time.Time `json:"start_time"`
+	EndTime              time.Time `json:"end_time"`
+	TotalRecords         int64     `json:"total_records"`
+	UniqueAPIKeys        int64     `json:"unique_api_keys"`
+	UniqueModels         int64     `json:"unique_models"`
+	TotalTokens          int64     `json:"total_tokens"`
+	TotalInputTokens     int64     `json:"total_input_tokens"`
+	TotalOutputTokens    int64     `json:"total_output_tokens"`
+	TotalReasoningTokens int64     `json:"total_reasoning_tokens"`
+	FailedCount          int64     `json:"failed_count"`
 }
 
 // DailyUsageStatistics represents daily aggregated usage statistics.
 type DailyUsageStatistics struct {
-	Date             string `json:"date"`
-	TotalRecords     int64  `json:"total_records"`
-	UniqueAPIKeys    int64  `json:"unique_api_keys"`
-	UniqueModels     int64  `json:"unique_models"`
-	TotalTokens      int64  `json:"total_tokens"`
-	TotalInputTokens int64  `json:"total_input_tokens"`
-	TotalOutputTokens int64 `json:"total_output_tokens"`
-	FailedCount      int64  `json:"failed_count"`
+	Date              string `json:"date"`
+	TotalRecords      int64  `json:"total_records"`
+	UniqueAPIKeys     int64  `json:"unique_api_keys"`
+	UniqueModels      int64  `json:"unique_models"`
+	TotalTokens       int64  `json:"total_tokens"`
+	TotalInputTokens  int64  `json:"total_input_tokens"`
+	TotalOutputTokens int64  `json:"total_output_tokens"`
+	FailedCount       int64  `json:"failed_count"`
 }
 
 // ModelUsageStatistics represents model-specific aggregated usage statistics.

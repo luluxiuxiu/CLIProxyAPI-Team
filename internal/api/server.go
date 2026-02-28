@@ -360,8 +360,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Start Codex quota auto-refresh
 	if s.codexQuotaManager != nil && authManager != nil {
 		s.codexQuotaManager.Start(context.Background(), &codexQuotaFetcherImpl{
-			authManager: authManager,
-			cfg:         cfg,
+			authManager:  authManager,
+			cfg:          cfg,
+			quotaManager: s.codexQuotaManager,
 		})
 	}
 
@@ -1150,8 +1151,9 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 
 // codexQuotaFetcherImpl implements quota.QuotaFetcher for Codex auth entries.
 type codexQuotaFetcherImpl struct {
-	authManager *auth.Manager
-	cfg         *config.Config
+	authManager  *auth.Manager
+	cfg          *config.Config
+	quotaManager *quota.CodexQuotaManager
 }
 
 func (f *codexQuotaFetcherImpl) ListCodexAuths() []quota.CodexAuthEntry {
@@ -1193,6 +1195,15 @@ func (f *codexQuotaFetcherImpl) ListCodexAuths() []quota.CodexAuthEntry {
 		proxyURL := strings.TrimSpace(auth.ProxyURL)
 
 		auth.EnsureIndex()
+		if f.quotaManager != nil {
+			if cached := f.quotaManager.GetQuota(auth.Index); cached == nil {
+				if restoredEntry, ok := quota.ReadQuotaFromMetadata(auth.Metadata); ok {
+					if f.quotaManager.RestoreCache(auth.Index, restoredEntry) {
+						log.Debugf("Codex quota cache restored from metadata for auth %s", auth.Index)
+					}
+				}
+			}
+		}
 		result = append(result, quota.CodexAuthEntry{
 			AuthIndex:   auth.Index,
 			AccountID:   accountID,
@@ -1205,5 +1216,52 @@ func (f *codexQuotaFetcherImpl) ListCodexAuths() []quota.CodexAuthEntry {
 }
 
 func (f *codexQuotaFetcherImpl) FetchQuota(ctx context.Context, auth quota.CodexAuthEntry) (*quota.CodexQuotaInfo, error) {
-	return quota.FetchQuotaForAuth(ctx, auth.AccessToken, auth.AccountID, auth.ProxyURL)
+	quotaInfo, err := quota.FetchQuotaForAuth(ctx, auth.AccessToken, auth.AccountID, auth.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if quotaInfo == nil {
+		return nil, nil
+	}
+	if f.authManager != nil {
+		f.persistCodexQuota(ctx, auth, quotaInfo)
+	}
+	return quotaInfo, nil
+}
+
+func (f *codexQuotaFetcherImpl) persistCodexQuota(ctx context.Context, authEntry quota.CodexAuthEntry, quotaInfo *quota.CodexQuotaInfo) {
+	if f == nil || f.authManager == nil || quotaInfo == nil {
+		return
+	}
+	auths := f.authManager.List()
+	for _, candidate := range auths {
+		if candidate == nil {
+			continue
+		}
+		candidate.EnsureIndex()
+		if candidate.Index != authEntry.AuthIndex {
+			continue
+		}
+
+		clone := candidate.Clone()
+		entry := &quota.CodexQuotaCacheEntry{
+			QuotaInfo:   quotaInfo,
+			FetchedAt:   time.Now(),
+			ExpiresAt:   time.Now().Add(quota.CodexQuotaCacheExpiry),
+			AccountID:   strings.TrimSpace(authEntry.AccountID),
+			AccessToken: strings.TrimSpace(authEntry.AccessToken),
+		}
+		clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
+		updated, errUpdate := f.authManager.Update(ctx, clone)
+		if errUpdate != nil {
+			log.WithError(errUpdate).Debugf("Codex quota auto-refresh persistence failed for auth %s", authEntry.AuthIndex)
+			return
+		}
+		path := ""
+		if updated != nil && updated.Attributes != nil {
+			path = strings.TrimSpace(updated.Attributes["path"])
+		}
+		log.Infof("Codex quota auto-refresh persisted: auth_index=%s path=%s", authEntry.AuthIndex, path)
+		return
+	}
 }
