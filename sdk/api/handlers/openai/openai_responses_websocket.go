@@ -31,6 +31,9 @@ const (
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsRequestBodyKey     = "REQUEST_BODY_OVERRIDE"
 	wsPayloadLogMaxSize  = 2048
+	wsRetryableErrorType = "invalid_request_error"
+	wsRetryableErrorCode = "websocket_connection_limit_reached"
+	wsRetryableErrorMsg  = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -401,10 +404,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				errs = nil
 				continue
 			}
+			forceReconnect := shouldTerminateResponsesWebsocketOnError(errMsg)
 			if errMsg != nil {
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
-				errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
+				var (
+					errorPayload []byte
+					errWrite     error
+				)
+				if forceReconnect {
+					errorPayload, errWrite = writeResponsesWebsocketRetryableReconnectError(conn, errMsg)
+				} else {
+					errorPayload, errWrite = writeResponsesWebsocketError(conn, errMsg)
+				}
 				appendWebsocketEvent(wsBodyLog, "response", errorPayload)
 				log.Infof(
 					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -426,6 +438,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 			if errMsg != nil {
 				cancel(errMsg.Error)
+				if forceReconnect {
+					if errMsg.Error != nil {
+						return completedOutput, errMsg.Error
+					}
+					return completedOutput, fmt.Errorf("responses websocket: force reconnect on usage limit")
+				}
 			} else {
 				cancel(nil)
 			}
@@ -540,6 +558,29 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
+func writeResponsesWebsocketRetryableReconnectError(conn *websocket.Conn, errMsg *interfaces.ErrorMessage) ([]byte, error) {
+	payload := buildResponsesWebsocketRetryableReconnectPayload(errMsg)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return data, conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func buildResponsesWebsocketRetryableReconnectPayload(errMsg *interfaces.ErrorMessage) map[string]any {
+	payload := map[string]any{
+		"type":   wsEventTypeError,
+		"status": http.StatusBadRequest,
+		"error": map[string]any{
+			"type":    wsRetryableErrorType,
+			"code":    wsRetryableErrorCode,
+			"message": usageLimitErrorMessage(errMsg),
+		},
+	}
+	appendResponsesWebsocketErrorHeaders(payload, errMsg)
+	return payload
+}
+
 func writeResponsesWebsocketError(conn *websocket.Conn, errMsg *interfaces.ErrorMessage) ([]byte, error) {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
@@ -558,19 +599,7 @@ func writeResponsesWebsocketError(conn *websocket.Conn, errMsg *interfaces.Error
 		"type":   wsEventTypeError,
 		"status": status,
 	}
-
-	if errMsg != nil && errMsg.Addon != nil {
-		headers := map[string]any{}
-		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
-				continue
-			}
-			headers[key] = values[0]
-		}
-		if len(headers) > 0 {
-			payload["headers"] = headers
-		}
-	}
+	appendResponsesWebsocketErrorHeaders(payload, errMsg)
 
 	if len(body) > 0 && json.Valid(body) {
 		var decoded map[string]any
@@ -595,6 +624,22 @@ func writeResponsesWebsocketError(conn *websocket.Conn, errMsg *interfaces.Error
 		return nil, err
 	}
 	return data, conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func appendResponsesWebsocketErrorHeaders(payload map[string]any, errMsg *interfaces.ErrorMessage) {
+	if payload == nil || errMsg == nil || errMsg.Addon == nil {
+		return
+	}
+	headers := map[string]any{}
+	for key, values := range errMsg.Addon {
+		if len(values) == 0 {
+			continue
+		}
+		headers[key] = values[0]
+	}
+	if len(headers) > 0 {
+		payload["headers"] = headers
+	}
 }
 
 func appendWebsocketEvent(builder *strings.Builder, eventType string, payload []byte) {
@@ -638,6 +683,63 @@ func websocketPayloadPreview(payload []byte) string {
 		return fmt.Sprintf("%s...(truncated,total=%d)", previewText, len(trimmedPayload))
 	}
 	return previewText
+}
+
+func shouldTerminateResponsesWebsocketOnError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	return isUsageLimitMessage(errMsg.Error.Error())
+}
+
+func usageLimitErrorMessage(errMsg *interfaces.ErrorMessage) string {
+	if errMsg == nil || errMsg.Error == nil {
+		return wsRetryableErrorMsg
+	}
+	raw := strings.TrimSpace(errMsg.Error.Error())
+	if raw == "" {
+		return wsRetryableErrorMsg
+	}
+	if json.Valid([]byte(raw)) {
+		msg := strings.TrimSpace(gjson.Get(raw, "error.message").String())
+		if msg != "" {
+			return msg
+		}
+	}
+	return raw
+}
+
+func isUsageLimitMessage(message string) bool {
+	raw := strings.TrimSpace(message)
+	if raw == "" {
+		return false
+	}
+
+	// Prefer structured detection when the upstream error is JSON.
+	if json.Valid([]byte(raw)) {
+		errType := strings.ToLower(strings.TrimSpace(gjson.Get(raw, "error.type").String()))
+		if errType == "usage_limit_reached" {
+			return true
+		}
+		status := int(gjson.Get(raw, "status").Int())
+		errMsg := strings.ToLower(strings.TrimSpace(gjson.Get(raw, "error.message").String()))
+		hasResetHint := gjson.Get(raw, "error.resets_at").Exists() || gjson.Get(raw, "error.resets_in_seconds").Exists()
+		if status == http.StatusTooManyRequests && (strings.Contains(errMsg, "usage limit") || hasResetHint) {
+			return true
+		}
+	}
+
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "usage_limit_reached") {
+		return true
+	}
+	if strings.Contains(lower, "\"status\":429") && strings.Contains(lower, "usage limit") {
+		return true
+	}
+	if strings.Contains(lower, "usage limit") && strings.Contains(lower, "try again at") {
+		return true
+	}
+	return false
 }
 
 func setWebsocketRequestBody(c *gin.Context, body string) {

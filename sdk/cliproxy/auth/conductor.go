@@ -1471,7 +1471,7 @@ func statusCodeFromError(err error) int {
 	}
 	var sc statusCoder
 	if errors.As(err, &sc) && sc != nil {
-		return sc.StatusCode()
+		return normalizeStatusCodeForMessage(sc.StatusCode(), err.Error())
 	}
 	return 0
 }
@@ -1498,7 +1498,34 @@ func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0
 	}
-	return err.StatusCode()
+	return normalizeStatusCodeForMessage(err.StatusCode(), err.Message)
+}
+
+func normalizeStatusCodeForMessage(status int, message string) int {
+	if status == http.StatusTooManyRequests {
+		return status
+	}
+	if isUsageLimitMessage(message) {
+		return http.StatusTooManyRequests
+	}
+	return status
+}
+
+func isUsageLimitMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "usage_limit_reached") {
+		return true
+	}
+	if strings.Contains(lower, "\"status\":429") && strings.Contains(lower, "usage limit") {
+		return true
+	}
+	if strings.Contains(lower, "usage limit") && strings.Contains(lower, "try again at") {
+		return true
+	}
+	return false
 }
 
 // isRequestInvalidError returns true if the error represents a client request
@@ -1513,7 +1540,7 @@ func isRequestInvalidError(err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
-	return strings.Contains(err.Error(), "invalid_request_error")
+	return strings.Contains(strings.ToLower(err.Error()), "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

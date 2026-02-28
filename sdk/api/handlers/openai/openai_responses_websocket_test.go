@@ -2,12 +2,14 @@ package openai
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/tidwall/gjson"
 )
 
@@ -245,5 +247,98 @@ func TestSetWebsocketRequestBody(t *testing.T) {
 	}
 	if string(bodyBytes) != "event body" {
 		t.Fatalf("request body = %q, want %q", string(bodyBytes), "event body")
+	}
+}
+
+func TestShouldTerminateResponsesWebsocketOnError_UsageLimit(t *testing.T) {
+	t.Parallel()
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error: fmt.Errorf(
+			`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 2026-02-28T12:00:00Z","type":"invalid_request_error"}}`,
+		),
+	}
+
+	if !shouldTerminateResponsesWebsocketOnError(errMsg) {
+		t.Fatalf("expected usage-limit error to force websocket reconnect")
+	}
+}
+
+func TestShouldTerminateResponsesWebsocketOnError_NormalError(t *testing.T) {
+	t.Parallel()
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf(`{"error":{"message":"invalid request body","type":"invalid_request_error"}}`),
+	}
+
+	if shouldTerminateResponsesWebsocketOnError(errMsg) {
+		t.Fatalf("normal bad request should not force websocket reconnect")
+	}
+}
+
+func TestShouldTerminateResponsesWebsocketOnError_UsageLimitReachedType(t *testing.T) {
+	t.Parallel()
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error: fmt.Errorf(
+			`{"type":"error","status":429,"error":{"message":"The usage limit has been reached","plan_type":"free","resets_at":1772380200,"resets_in_seconds":123827,"type":"usage_limit_reached"}}`,
+		),
+	}
+
+	if !shouldTerminateResponsesWebsocketOnError(errMsg) {
+		t.Fatalf("expected usage_limit_reached payload to force websocket reconnect")
+	}
+}
+
+func TestBuildResponsesWebsocketRetryableReconnectPayload_UsageLimit(t *testing.T) {
+	t.Parallel()
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error: fmt.Errorf(
+			`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 2026-02-28T12:00:00Z","type":"invalid_request_error"}}`,
+		),
+		Addon: http.Header{
+			"Retry-After": []string{"120"},
+		},
+	}
+
+	payload := buildResponsesWebsocketRetryableReconnectPayload(errMsg)
+
+	status, ok := payload["status"].(int)
+	if !ok {
+		t.Fatalf("status type = %T, want int", payload["status"])
+	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+
+	errorObj, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error type = %T, want map[string]any", payload["error"])
+	}
+	if got := errorObj["type"]; got != wsRetryableErrorType {
+		t.Fatalf("error.type = %v, want %q", got, wsRetryableErrorType)
+	}
+	if got := errorObj["code"]; got != wsRetryableErrorCode {
+		t.Fatalf("error.code = %v, want %q", got, wsRetryableErrorCode)
+	}
+	msg, ok := errorObj["message"].(string)
+	if !ok {
+		t.Fatalf("error.message type = %T, want string", errorObj["message"])
+	}
+	if !strings.Contains(strings.ToLower(msg), "usage limit") {
+		t.Fatalf("error.message = %q, want contains usage limit", msg)
+	}
+
+	headersObj, ok := payload["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("headers type = %T, want map[string]any", payload["headers"])
+	}
+	if got := headersObj["Retry-After"]; got != "120" {
+		t.Fatalf("headers Retry-After = %v, want %q", got, "120")
 	}
 }

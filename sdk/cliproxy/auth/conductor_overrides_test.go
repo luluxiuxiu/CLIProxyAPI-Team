@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -93,5 +94,60 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
+func TestIsRequestInvalidError_UsageLimitDoesNotBlockRetry(t *testing.T) {
+	t.Parallel()
+
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"invalid_request_error","message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 2026-02-28T12:00:00Z"}}`,
+	}
+
+	if isRequestInvalidError(err) {
+		t.Fatalf("usage-limit bad request should not be treated as invalid_request_error")
+	}
+	if got := statusCodeFromError(err); got != http.StatusTooManyRequests {
+		t.Fatalf("statusCodeFromError = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestApplyAuthFailureState_UsageLimitMapsToQuota(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{ID: "auth-usage-limit"}
+	resultErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"error":{"type":"invalid_request_error","message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 2026-02-28T12:00:00Z"}}`,
+	}
+
+	applyAuthFailureState(auth, resultErr, nil, now)
+
+	if !auth.Quota.Exceeded {
+		t.Fatalf("expected quota exceeded=true")
+	}
+	if auth.Quota.Reason != "quota" {
+		t.Fatalf("quota reason = %q, want %q", auth.Quota.Reason, "quota")
+	}
+	if auth.StatusMessage != "quota exhausted" {
+		t.Fatalf("status message = %q, want %q", auth.StatusMessage, "quota exhausted")
+	}
+	if auth.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be scheduled")
+	}
+}
+
+func TestStatusCodeFromError_UsageLimitReachedTypeStringMapsTo429(t *testing.T) {
+	t.Parallel()
+
+	err := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    `{"type":"error","status":429,"error":{"message":"The usage limit has been reached","type":"usage_limit_reached"}}`,
+	}
+
+	if got := statusCodeFromError(err); got != http.StatusTooManyRequests {
+		t.Fatalf("statusCodeFromError = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
