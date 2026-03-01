@@ -278,6 +278,21 @@ func TestShouldTerminateResponsesWebsocketOnError_NormalError(t *testing.T) {
 	}
 }
 
+func TestShouldTerminateResponsesWebsocketOnError_MissingToolOutput(t *testing.T) {
+	t.Parallel()
+
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error: fmt.Errorf(
+			`{"error":{"code":null,"message":"No tool output found for function call call_hmsSxY2jMyKBGEPhFF7LNnJY.","param":"input","type":"invalid_request_error"},"status":400,"type":"error"}`,
+		),
+	}
+
+	if !shouldTerminateResponsesWebsocketOnError(errMsg) {
+		t.Fatalf("expected missing-tool-output error to force websocket reconnect")
+	}
+}
+
 func TestShouldTerminateResponsesWebsocketOnError_UsageLimitReachedType(t *testing.T) {
 	t.Parallel()
 

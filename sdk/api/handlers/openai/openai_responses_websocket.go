@@ -689,7 +689,8 @@ func shouldTerminateResponsesWebsocketOnError(errMsg *interfaces.ErrorMessage) b
 	if errMsg == nil || errMsg.Error == nil {
 		return false
 	}
-	return isUsageLimitMessage(errMsg.Error.Error())
+	raw := errMsg.Error.Error()
+	return isUsageLimitMessage(raw) || isMissingToolOutputMessage(raw)
 }
 
 func usageLimitErrorMessage(errMsg *interfaces.ErrorMessage) string {
@@ -740,6 +741,32 @@ func isUsageLimitMessage(message string) bool {
 		return true
 	}
 	return false
+}
+
+func isMissingToolOutputMessage(message string) bool {
+	raw := strings.TrimSpace(message)
+	if raw == "" {
+		return false
+	}
+
+	// Prefer structured detection when the upstream error is JSON.
+	if json.Valid([]byte(raw)) {
+		errMsg := strings.TrimSpace(gjson.Get(raw, "error.message").String())
+		if errMsg != "" {
+			return isMissingToolOutputText(errMsg)
+		}
+	}
+
+	return isMissingToolOutputText(raw)
+}
+
+func isMissingToolOutputText(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "no tool output found for function call") ||
+		strings.Contains(lower, "no tool output found for tool call")
 }
 
 func setWebsocketRequestBody(c *gin.Context, body string) {
