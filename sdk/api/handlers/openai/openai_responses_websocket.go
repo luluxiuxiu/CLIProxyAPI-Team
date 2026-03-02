@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,18 +25,19 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsEventTypeDone      = "response.done"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsRequestBodyKey     = "REQUEST_BODY_OVERRIDE"
-	wsPayloadLogMaxSize  = 2048
-	wsRetryableErrorType = "invalid_request_error"
-	wsRetryableErrorCode = "websocket_connection_limit_reached"
-	wsRetryableErrorMsg  = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."
+	wsRequestTypeCreate           = "response.create"
+	wsRequestTypeAppend           = "response.append"
+	wsEventTypeError              = "error"
+	wsEventTypeCompleted          = "response.completed"
+	wsEventTypeDone               = "response.done"
+	wsDoneMarker                  = "[DONE]"
+	wsTurnStateHeader             = "x-codex-turn-state"
+	wsRequestBodyKey              = "REQUEST_BODY_OVERRIDE"
+	wsPayloadLogMaxSize           = 2048
+	wsRetryableErrorType          = "invalid_request_error"
+	wsRetryableErrorCode          = "websocket_connection_limit_reached"
+	wsRetryableErrorMsg           = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."
+	responsesWebsocketIdleTimeout = 120 * time.Second
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -79,12 +83,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	anyOperationCompleted := false
+	maxBootstrapRetries := handlers.StreamingBootstrapRetries(h.Cfg)
+	if maxBootstrapRetries < 1 {
+		maxBootstrapRetries = 1
+	}
 
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(responsesWebsocketIdleTimeout))
 		msgType, payload, errReadMessage := conn.ReadMessage()
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
 			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errReadMessage.Error()))
+			var netErr net.Error
+			if errors.As(errReadMessage, &netErr) && netErr.Timeout() {
+				log.Infof("responses websocket: idle timeout id=%s timeout=%s", passthroughSessionID, responsesWebsocketIdleTimeout)
+				return
+			}
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
 				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
 			} else {
@@ -146,26 +161,64 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		lastRequest = updatedLastRequest
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
-		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
-		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
-		if pinnedAuthID != "" {
-			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
-		} else {
-			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
-				pinnedAuthID = strings.TrimSpace(authID)
-			})
+		retryDownstream := !anyOperationCompleted
+		maxAttempts := 1
+		if retryDownstream {
+			maxAttempts = 1 + maxBootstrapRetries
 		}
-		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+			cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
+			if pinnedAuthID != "" {
+				cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+			} else {
+				cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+					pinnedAuthID = strings.TrimSpace(authID)
+				})
+			}
+			dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
-		if errForward != nil {
-			wsTerminateErr = errForward
-			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errForward.Error()))
-			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
-			return
+			allowRetry := retryDownstream && attempt < maxAttempts-1
+			terminateOnForceReconnect := !retryDownstream
+			completedOutput, completed, errForward := h.forwardResponsesWebsocket(
+				c,
+				conn,
+				cliCancel,
+				dataChan,
+				errChan,
+				&wsBodyLog,
+				passthroughSessionID,
+				allowRetry,
+				terminateOnForceReconnect,
+			)
+			if errForward != nil {
+				var retryErr *responsesWebsocketRetryError
+				if allowRetry && errors.As(errForward, &retryErr) {
+					if h != nil && h.AuthManager != nil {
+						h.AuthManager.CloseExecutionSession(passthroughSessionID)
+						log.Infof(
+							"responses websocket: downstream reconnect attempt=%d id=%s reason=%s error=%v",
+							attempt+1,
+							passthroughSessionID,
+							retryErr.reason,
+							retryErr.cause,
+						)
+					}
+					time.Sleep(responsesWebsocketRetryDelay(attempt))
+					continue
+				}
+				wsTerminateErr = errForward
+				appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errForward.Error()))
+				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
+				return
+			}
+			if completed {
+				anyOperationCompleted = true
+			}
+			lastResponseOutput = completedOutput
+			break
 		}
-		lastResponseOutput = completedOutput
 	}
 }
 
@@ -390,22 +443,52 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsBodyLog *strings.Builder,
 	sessionID string,
-) ([]byte, error) {
+	allowRetry bool,
+	terminateOnForceReconnect bool,
+) ([]byte, bool, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	sentPayload := false
+	idleTimer := time.NewTimer(responsesWebsocketIdleTimeout)
+	defer func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+	}()
+	resetIdle := func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(responsesWebsocketIdleTimeout)
+	}
 
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+			return completedOutput, completed, c.Request.Context().Err()
+		case <-idleTimer.C:
+			errIdle := fmt.Errorf("responses websocket: idle timeout (%s)", responsesWebsocketIdleTimeout)
+			cancel(errIdle)
+			return completedOutput, completed, errIdle
 		case errMsg, ok := <-errs:
+			resetIdle()
 			if !ok {
 				errs = nil
 				continue
 			}
 			forceReconnect := shouldTerminateResponsesWebsocketOnError(errMsg)
 			if errMsg != nil {
+				if allowRetry && !sentPayload && responsesWebsocketShouldRetryDownstream(errMsg, forceReconnect) {
+					cancel(errMsg.Error)
+					return completedOutput, completed, &responsesWebsocketRetryError{cause: errMsg.Error, reason: "downstream_error"}
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				var (
@@ -416,6 +499,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					errorPayload, errWrite = writeResponsesWebsocketRetryableReconnectError(conn, errMsg)
 				} else {
 					errorPayload, errWrite = writeResponsesWebsocketError(conn, errMsg)
+				}
+				if errWrite == nil {
+					sentPayload = true
 				}
 				appendWebsocketEvent(wsBodyLog, "response", errorPayload)
 				log.Infof(
@@ -433,31 +519,45 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	errWrite,
 					// )
 					cancel(errMsg.Error)
-					return completedOutput, errWrite
+					return completedOutput, completed, errWrite
 				}
 			}
 			if errMsg != nil {
 				cancel(errMsg.Error)
 				if forceReconnect {
 					if errMsg.Error != nil {
-						return completedOutput, errMsg.Error
+						if terminateOnForceReconnect {
+							return completedOutput, completed, errMsg.Error
+						}
+						return completedOutput, completed, nil
 					}
-					return completedOutput, fmt.Errorf("responses websocket: force reconnect on usage limit")
+					if terminateOnForceReconnect {
+						return completedOutput, completed, fmt.Errorf("responses websocket: force reconnect on usage limit")
+					}
+					return completedOutput, completed, nil
 				}
 			} else {
 				cancel(nil)
 			}
-			return completedOutput, nil
+			return completedOutput, completed, nil
 		case chunk, ok := <-data:
+			resetIdle()
 			if !ok {
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
+					if allowRetry && !sentPayload {
+						cancel(errMsg.Error)
+						return completedOutput, completed, &responsesWebsocketRetryError{cause: errMsg.Error, reason: "stream_closed"}
+					}
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
+					if errWrite == nil {
+						sentPayload = true
+					}
 					appendWebsocketEvent(wsBodyLog, "response", errorPayload)
 					log.Infof(
 						"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
@@ -474,13 +574,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							errWrite,
 						)
 						cancel(errMsg.Error)
-						return completedOutput, errWrite
+						return completedOutput, completed, errWrite
 					}
 					cancel(errMsg.Error)
-					return completedOutput, nil
+					return completedOutput, completed, nil
 				}
 				cancel(nil)
-				return completedOutput, nil
+				return completedOutput, completed, nil
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
@@ -510,11 +610,86 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						errWrite,
 					)
 					cancel(errWrite)
-					return completedOutput, errWrite
+					return completedOutput, completed, errWrite
 				}
+				sentPayload = true
 			}
 		}
 	}
+}
+
+type responsesWebsocketRetryError struct {
+	cause  error
+	reason string
+}
+
+func (e *responsesWebsocketRetryError) Error() string {
+	if e == nil {
+		return "responses websocket: retryable downstream error"
+	}
+	if e.cause == nil {
+		if e.reason != "" {
+			return fmt.Sprintf("responses websocket: retryable downstream error (%s)", e.reason)
+		}
+		return "responses websocket: retryable downstream error"
+	}
+	if e.reason != "" {
+		return fmt.Sprintf("responses websocket: retryable downstream error (%s): %v", e.reason, e.cause)
+	}
+	return fmt.Sprintf("responses websocket: retryable downstream error: %v", e.cause)
+}
+
+func (e *responsesWebsocketRetryError) Unwrap() error { return e.cause }
+
+func responsesWebsocketRetryDelay(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 250 * time.Millisecond
+	}
+	if attempt == 1 {
+		return 500 * time.Millisecond
+	}
+	if attempt == 2 {
+		return time.Second
+	}
+	return 2 * time.Second
+}
+
+func responsesWebsocketShouldRetryDownstream(errMsg *interfaces.ErrorMessage, forceReconnect bool) bool {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	if forceReconnect {
+		return true
+	}
+	status := errMsg.StatusCode
+	if status == 0 || status == http.StatusBadGateway || status == http.StatusGatewayTimeout || status >= http.StatusInternalServerError {
+		return true
+	}
+	return responsesWebsocketIsLikelyDisconnect(errMsg.Error)
+}
+
+func responsesWebsocketIsLikelyDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "use of closed network connection") ||
+		strings.Contains(lower, "websocket: close") ||
+		strings.Contains(lower, "write:") && strings.Contains(lower, "connection") && strings.Contains(lower, "closed")
 }
 
 func responseCompletedOutputFromPayload(payload []byte) []byte {
