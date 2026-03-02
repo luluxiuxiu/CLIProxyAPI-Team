@@ -37,7 +37,7 @@ const (
 	wsRetryableErrorType          = "invalid_request_error"
 	wsRetryableErrorCode          = "websocket_connection_limit_reached"
 	wsRetryableErrorMsg           = "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."
-	responsesWebsocketIdleTimeout = 120 * time.Second
+	responsesWebsocketIdleTimeout = 600 * time.Second
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -478,11 +478,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			cancel(errIdle)
 			return completedOutput, completed, errIdle
 		case errMsg, ok := <-errs:
-			resetIdle()
 			if !ok {
 				errs = nil
 				continue
 			}
+			resetIdle()
 			forceReconnect := shouldTerminateResponsesWebsocketOnError(errMsg)
 			if errMsg != nil {
 				if allowRetry && !sentPayload && responsesWebsocketShouldRetryDownstream(errMsg, forceReconnect) {
@@ -502,6 +502,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				if errWrite == nil {
 					sentPayload = true
+					resetIdle()
 				}
 				appendWebsocketEvent(wsBodyLog, "response", errorPayload)
 				log.Infof(
@@ -541,7 +542,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 			return completedOutput, completed, nil
 		case chunk, ok := <-data:
-			resetIdle()
 			if !ok {
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
@@ -557,6 +557,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
 					if errWrite == nil {
 						sentPayload = true
+						resetIdle()
 					}
 					appendWebsocketEvent(wsBodyLog, "response", errorPayload)
 					log.Infof(
@@ -583,6 +584,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, completed, nil
 			}
 
+			resetIdle()
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
@@ -613,6 +615,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					return completedOutput, completed, errWrite
 				}
 				sentPayload = true
+				resetIdle()
 			}
 		}
 	}
