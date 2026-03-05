@@ -489,6 +489,22 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					cancel(errMsg.Error)
 					return completedOutput, completed, &responsesWebsocketRetryError{cause: errMsg.Error, reason: "downstream_error"}
 				}
+				// Intercept all 4XX errors: log them but do NOT forward to client.
+				// Force-close the connection abruptly (no close frame) so Codex CLI
+				// sees an abnormal disconnection and retries with a new account.
+				if errMsg.StatusCode >= http.StatusBadRequest && errMsg.StatusCode < http.StatusInternalServerError {
+					log.Warnf(
+						"responses websocket: intercepted 4XX error id=%s status=%d error=%v (force shutdown to trigger client retry)",
+						sessionID,
+						errMsg.StatusCode,
+						errMsg.Error,
+					)
+					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					markAPIResponseTimestamp(c)
+					cancel(errMsg.Error)
+					conn.UnderlyingConn().Close()
+					return completedOutput, completed, fmt.Errorf("responses websocket: 4XX intercepted status=%d", errMsg.StatusCode)
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				var (
@@ -665,6 +681,10 @@ func responsesWebsocketShouldRetryDownstream(errMsg *interfaces.ErrorMessage, fo
 		return true
 	}
 	status := errMsg.StatusCode
+	// 4XX errors are retryable during bootstrap to allow account rotation
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		return true
+	}
 	if status == 0 || status == http.StatusBadGateway || status == http.StatusGatewayTimeout || status >= http.StatusInternalServerError {
 		return true
 	}
