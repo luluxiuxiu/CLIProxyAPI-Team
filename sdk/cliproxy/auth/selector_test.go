@@ -9,8 +9,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
+
+func codexQuotaTestMetadata(allowed bool, limitReached bool, usedPercent int, resetAt int64) map[string]any {
+	return quota.PersistQuotaToMetadata(nil, &quota.CodexQuotaCacheEntry{
+		QuotaInfo: &quota.CodexQuotaInfo{
+			RateLimit: &quota.RateLimitInfo{
+				Allowed:      allowed,
+				LimitReached: limitReached,
+				PrimaryWindow: &quota.LimitWindow{
+					UsedPercent: usedPercent,
+					ResetAt:     resetAt,
+				},
+			},
+		},
+		FetchedAt: time.Now(),
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	})
+}
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	t.Parallel()
@@ -84,6 +102,120 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 		if got.ID == "c" {
 			t.Fatalf("Pick() #%d unexpectedly selected lower priority auth", i)
 		}
+	}
+}
+
+func TestFillFirstSelectorPick_MixedCodexCandidatesPreferHigherQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now().Unix()
+	auths := []*Auth{
+		{ID: "codex-high", Provider: "codex", Metadata: codexQuotaTestMetadata(true, false, 12, now+600)},
+		{ID: "codex-low", Provider: "codex", Metadata: codexQuotaTestMetadata(true, false, 78, now+300)},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "codex-high" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "codex-high")
+	}
+}
+
+func TestRoundRobinSelectorPick_MixedCodexCandidatesPreferHigherQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	now := time.Now().Unix()
+	auths := []*Auth{
+		{ID: "codex-high", Provider: "codex", Metadata: codexQuotaTestMetadata(true, false, 5, now+600)},
+		{ID: "codex-low", Provider: "codex", Metadata: codexQuotaTestMetadata(true, false, 83, now+300)},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "codex-high" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "codex-high")
+	}
+}
+
+func TestIsAuthBlockedForModel_CodexQuotaDepletedBlocksUntilReset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	resetAt := now.Add(15 * time.Minute).Unix()
+	auth := &Auth{
+		ID:       "codex-depleted",
+		Provider: "codex",
+		Metadata: codexQuotaTestMetadata(false, true, 100, resetAt),
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	want := time.Unix(resetAt, 0)
+	if diff := next.Sub(want); diff < -time.Second || diff > time.Second {
+		t.Fatalf("next = %v, want around %v", next, want)
+	}
+}
+
+func TestFillFirstSelectorPick_CodexQuotaDepletedSkipped(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now().Unix()
+	auths := []*Auth{
+		{ID: "codex-zero", Provider: "codex", Metadata: codexQuotaTestMetadata(false, true, 100, now+900)},
+		{ID: "codex-ok", Provider: "codex", Metadata: codexQuotaTestMetadata(true, false, 24, now+300)},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "codex-ok" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "codex-ok")
+	}
+}
+
+func TestFillFirstSelectorPick_AllCodexQuotaDepletedReturnsCooldown(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now().Unix()
+	auths := []*Auth{
+		{ID: "codex-zero-1", Provider: "codex", Metadata: codexQuotaTestMetadata(false, true, 100, now+900)},
+		{ID: "codex-zero-2", Provider: "codex", Metadata: codexQuotaTestMetadata(false, true, 100, now+600)},
+	}
+
+	_, err := selector.Pick(context.Background(), "codex", "gpt-5", cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil")
+	}
+
+	var mce *modelCooldownError
+	if !errors.As(err, &mce) {
+		t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+	}
+	if mce.resetIn <= 0 {
+		t.Fatalf("resetIn = %v, want > 0", mce.resetIn)
 	}
 }
 

@@ -289,6 +289,64 @@ func preferCodexQuotaAuths(available []*Auth) []*Auth {
 	return tie
 }
 
+func shouldPreferCodexQuota(provider string, available []*Auth) bool {
+	if len(available) <= 1 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return true
+	}
+	for i := 0; i < len(available); i++ {
+		candidate := available[i]
+		if candidate == nil || !strings.EqualFold(strings.TrimSpace(candidate.Provider), "codex") {
+			return false
+		}
+	}
+	return true
+}
+
+func codexQuotaBlockedUntil(auth *Auth, now time.Time) (time.Time, bool) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.Metadata) == 0 {
+		return time.Time{}, false
+	}
+	entry, ok := quota.ReadQuotaFromMetadata(auth.Metadata)
+	if !ok || entry == nil || entry.QuotaInfo == nil || entry.QuotaInfo.RateLimit == nil {
+		return time.Time{}, false
+	}
+	if !entry.ExpiresAt.IsZero() && !entry.ExpiresAt.After(now) {
+		return time.Time{}, false
+	}
+	rate := entry.QuotaInfo.RateLimit
+	quotaDepleted := !rate.Allowed || rate.LimitReached
+	if !quotaDepleted && rate.PrimaryWindow != nil && rate.PrimaryWindow.UsedPercent >= 100 {
+		quotaDepleted = true
+	}
+	if !quotaDepleted {
+		return time.Time{}, false
+	}
+
+	next := entry.ExpiresAt
+	if rate.PrimaryWindow != nil && rate.PrimaryWindow.ResetAt > 0 {
+		resetAt := time.Unix(rate.PrimaryWindow.ResetAt, 0)
+		if resetAt.After(now) && (next.IsZero() || resetAt.Before(next)) {
+			next = resetAt
+		}
+	}
+	if rate.SecondaryWindow != nil && rate.SecondaryWindow.ResetAt > 0 {
+		resetAt := time.Unix(rate.SecondaryWindow.ResetAt, 0)
+		if resetAt.After(now) && (next.IsZero() || resetAt.Before(next)) {
+			next = resetAt
+		}
+	}
+	if next.IsZero() {
+		next = now
+	}
+	if next.Before(now) {
+		next = now
+	}
+	return next, true
+}
+
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -358,7 +416,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+	if shouldPreferCodexQuota(provider, available) {
 		available = preferCodexQuotaAuths(available)
 	}
 	key := provider + ":" + canonicalModelKey(model)
@@ -460,7 +518,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+	if shouldPreferCodexQuota(provider, available) {
 		available = preferCodexQuotaAuths(available)
 	}
 	return available[0], nil
@@ -472,6 +530,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
+	}
+	if next, blocked := codexQuotaBlockedUntil(auth, now); blocked {
+		return true, blockReasonCooldown, next
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
