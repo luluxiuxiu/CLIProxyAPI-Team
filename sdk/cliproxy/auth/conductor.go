@@ -451,6 +451,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.mu.Lock()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	globalCodexQuotaRanker.Upsert(auth)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
@@ -475,6 +476,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	globalCodexQuotaRanker.Upsert(auth)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
@@ -500,6 +502,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
+	globalCodexQuotaRanker.Reset(items)
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
@@ -1338,6 +1341,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		_ = m.persist(ctx, auth)
+		globalCodexQuotaRanker.Upsert(auth)
 	}
 	m.mu.Unlock()
 

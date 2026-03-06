@@ -249,6 +249,9 @@ func preferCodexQuotaAuths(available []*Auth) []*Auth {
 	if len(available) <= 1 {
 		return available
 	}
+	if reordered := globalCodexQuotaRanker.Reorder(available, time.Now()); len(reordered) > 0 {
+		return reordered
+	}
 
 	bestAuth := ""
 	var bestQuota *quota.CodexQuotaInfo
@@ -306,6 +309,9 @@ func shouldPreferCodexQuota(provider string, available []*Auth) bool {
 }
 
 func codexQuotaBlockedUntil(auth *Auth, now time.Time) (time.Time, bool) {
+	if next, blocked := globalCodexQuotaRanker.BlockedUntil(auth, now); blocked {
+		return next, true
+	}
 	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.Metadata) == 0 {
 		return time.Time{}, false
 	}
