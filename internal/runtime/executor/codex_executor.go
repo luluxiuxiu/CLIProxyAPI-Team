@@ -676,11 +676,37 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
-	err := statusErr{code: statusCode, msg: string(body)}
-	if retryAfter := parseCodexRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
+	normalizedStatus := normalizeCodexStatus(statusCode, body)
+	err := statusErr{code: normalizedStatus, msg: string(body)}
+	if retryAfter := parseCodexRetryAfter(normalizedStatus, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func normalizeCodexStatus(statusCode int, body []byte) int {
+	if statusCode != http.StatusForbidden {
+		return statusCode
+	}
+	if codexForbiddenLooksLikeHTML(body) {
+		return http.StatusServiceUnavailable
+	}
+	return statusCode
+}
+
+func codexForbiddenLooksLikeHTML(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(trimmed))
+	if strings.HasPrefix(lower, "<!doctype html") {
+		return true
+	}
+	if strings.HasPrefix(lower, "<html") || strings.HasPrefix(lower, "<head") || strings.HasPrefix(lower, "<body") {
+		return true
+	}
+	return strings.Contains(lower, "<html")
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

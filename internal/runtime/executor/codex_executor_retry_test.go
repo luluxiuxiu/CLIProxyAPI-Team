@@ -60,6 +60,24 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	})
 }
 
+func TestNewCodexStatusErr_NormalizesForbiddenHTMLToServiceUnavailable(t *testing.T) {
+	t.Parallel()
+
+	err := newCodexStatusErr(http.StatusForbidden, []byte("<!DOCTYPE html><html><body>Access denied</body></html>"))
+	if got := err.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
+func TestNewCodexStatusErr_PreservesStructuredForbiddenResponses(t *testing.T) {
+	t.Parallel()
+
+	err := newCodexStatusErr(http.StatusForbidden, []byte(`{"error":{"message":"forbidden","type":"access_denied"}}`))
+	if got := err.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("StatusCode() = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

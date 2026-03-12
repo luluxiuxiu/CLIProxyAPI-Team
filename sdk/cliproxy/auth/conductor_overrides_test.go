@@ -285,3 +285,27 @@ func TestStatusCodeFromError_UsageLimitReachedTypeStringMapsTo429(t *testing.T) 
 		t.Fatalf("statusCodeFromError = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
+
+func TestApplyAuthFailureState_ServiceUnavailableMapsToTransientUpstreamError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{ID: "auth-transient-service-unavailable"}
+	resultErr := &Error{
+		HTTPStatus: http.StatusServiceUnavailable,
+		Message:    "<!DOCTYPE html><html><body>Access denied</body></html>",
+	}
+
+	applyAuthFailureState(auth, resultErr, nil, now)
+
+	if auth.StatusMessage != "transient upstream error" {
+		t.Fatalf("status message = %q, want %q", auth.StatusMessage, "transient upstream error")
+	}
+	if auth.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be scheduled")
+	}
+	wait := auth.NextRetryAfter.Sub(now)
+	if wait < 59*time.Second || wait > 61*time.Second {
+		t.Fatalf("NextRetryAfter wait = %v, want about 1m", wait)
+	}
+}
