@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -38,6 +39,16 @@ const (
 	blockReasonDisabled
 	blockReasonOther
 )
+
+const (
+	codexPaidPriorityBoost = 1_000_000
+	codexFreePriorityBoost = 500_000
+)
+
+var paidFirstCodexModels = map[string]struct{}{
+	"gpt-5.3-codex": {},
+	"gpt-5.4":       {},
+}
 
 type modelCooldownError struct {
 	model    string
@@ -121,6 +132,52 @@ func authPriority(auth *Auth) int {
 		return 0
 	}
 	return parsed
+}
+
+func shouldPreferPaidCodexPlan(model string) bool {
+	_, ok := paidFirstCodexModels[canonicalModelKey(model)]
+	return ok
+}
+
+func codexPlanCategoryFromAuth(auth *Auth) string {
+	if auth == nil {
+		return "unknown"
+	}
+
+	planType := ""
+	if auth.Attributes != nil {
+		planType = strings.TrimSpace(auth.Attributes["plan_type"])
+	}
+	if planType == "" && auth.Metadata != nil {
+		if raw, ok := auth.Metadata["plan_type"].(string); ok {
+			planType = strings.TrimSpace(raw)
+		}
+	}
+	if planType == "" && auth.Metadata != nil {
+		if raw, ok := auth.Metadata["id_token"].(string); ok {
+			claims, err := codexauth.ParseJWTToken(strings.TrimSpace(raw))
+			if err == nil && claims != nil {
+				planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			}
+		}
+	}
+	return codexauth.PlanCategory(planType)
+}
+
+func authSelectionPriority(auth *Auth, model string) int {
+	priority := authPriority(auth)
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || !shouldPreferPaidCodexPlan(model) {
+		return priority
+	}
+
+	switch codexPlanCategoryFromAuth(auth) {
+	case "paid":
+		return priority + codexPaidPriorityBoost
+	case "free":
+		return priority + codexFreePriorityBoost
+	default:
+		return priority
+	}
 }
 
 func canonicalModelKey(model string) string {
@@ -359,7 +416,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authSelectionPriority(candidate, model)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}

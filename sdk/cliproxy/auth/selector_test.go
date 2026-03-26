@@ -149,6 +149,66 @@ func TestRoundRobinSelectorPick_MixedCodexCandidatesPreferHigherQuota(t *testing
 	}
 }
 
+func TestFillFirstSelectorPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{ID: "free", Provider: "codex", Attributes: map[string]string{"priority": "999", "plan_type": "free"}},
+		{ID: "paid", Provider: "codex", Attributes: map[string]string{"priority": "0", "plan_type": "plus"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "paid" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "paid")
+	}
+}
+
+func TestRoundRobinSelectorPick_TargetCodexModelsFallbackToFreeWhenPaidCoolingDown(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	now := time.Now()
+	auths := []*Auth{
+		{
+			ID:       "paid",
+			Provider: "codex",
+			Attributes: map[string]string{
+				"priority":  "0",
+				"plan_type": "pro",
+			},
+			ModelStates: map[string]*ModelState{
+				"gpt-5.3-codex": {
+					Status:         StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(30 * time.Minute),
+					Quota: QuotaState{
+						Exceeded: true,
+					},
+				},
+			},
+		},
+		{ID: "free", Provider: "codex", Attributes: map[string]string{"priority": "999", "plan_type": "free"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "free" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "free")
+	}
+}
+
 func TestIsAuthBlockedForModel_CodexQuotaDepletedBlocksUntilReset(t *testing.T) {
 	t.Parallel()
 

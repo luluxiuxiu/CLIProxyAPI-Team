@@ -208,6 +208,69 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
+func TestSchedulerPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.4"
+	registerSchedulerModels(t, "codex", model, "gpt54-free", "gpt54-paid")
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		&Auth{ID: "gpt54-free", Provider: "codex", Attributes: map[string]string{"priority": "999", "plan_type": "free"}},
+		&Auth{ID: "gpt54-paid", Provider: "codex", Attributes: map[string]string{"priority": "0", "plan_type": "plus"}},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "gpt54-paid" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "gpt54-paid")
+	}
+}
+
+func TestSchedulerPick_TargetCodexModelsFallbackToFreeWhenPaidCoolingDown(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.3-codex"
+	registerSchedulerModels(t, "codex", model, "gpt53-free", "gpt53-paid")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "gpt53-paid",
+			Provider: "codex",
+			Attributes: map[string]string{
+				"priority":  "0",
+				"plan_type": "pro",
+			},
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(30 * time.Minute),
+					Quota: QuotaState{
+						Exceeded: true,
+					},
+				},
+			},
+		},
+		&Auth{ID: "gpt53-free", Provider: "codex", Attributes: map[string]string{"priority": "999", "plan_type": "free"}},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "gpt53-free" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "gpt53-free")
+	}
+}
+
 func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 

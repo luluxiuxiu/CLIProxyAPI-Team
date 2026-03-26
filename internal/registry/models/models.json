@@ -1623,6 +1623,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4",
+      "description": "Stable mini version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-plus": [
@@ -1898,6 +1921,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4",
+      "description": "Stable mini version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-pro": [
@@ -2160,6 +2206,29 @@
       "display_name": "GPT 5.4",
       "version": "gpt-5.4",
       "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4",
+      "description": "Stable mini version of GPT 5.4",
       "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [

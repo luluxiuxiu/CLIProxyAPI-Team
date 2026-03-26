@@ -67,10 +67,11 @@ type modelScheduler struct {
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
 type scheduledAuth struct {
-	meta        *scheduledAuthMeta
-	auth        *Auth
-	state       scheduledState
-	nextRetryAt time.Time
+	meta              *scheduledAuthMeta
+	auth              *Auth
+	effectivePriority int
+	state             scheduledState
+	nextRetryAt       time.Time
 }
 
 // readyBucket keeps the ready views for one priority level.
@@ -568,13 +569,14 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousParent := ""
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
-		previousPriority = entry.meta.priority
+		previousPriority = entry.effectivePriority
 		previousParent = entry.meta.virtualParent
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
 	entry.meta = meta
 	entry.auth = meta.auth
+	entry.effectivePriority = authSelectionPriority(meta.auth, m.modelKey)
 	entry.nextRetryAt = time.Time{}
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
 	switch {
@@ -590,7 +592,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == entry.effectivePriority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -764,7 +766,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		switch entry.state {
 		case scheduledStateReady:
-			priority := entry.meta.priority
+			priority := entry.effectivePriority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
