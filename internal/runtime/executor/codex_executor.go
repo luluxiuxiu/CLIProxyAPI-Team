@@ -173,6 +173,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		line = bytes.TrimSpace(line[5:])
+		if streamErr := parseCodexStreamStatusErr(line, time.Now()); streamErr != nil {
+			err = *streamErr
+			return resp, err
+		}
 		if gjson.GetBytes(line, "type").String() != "response.completed" {
 			continue
 		}
@@ -381,6 +385,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				if streamErr := parseCodexStreamStatusErr(data, time.Now()); streamErr != nil {
+					recordAPIResponseError(ctx, e.cfg, *streamErr)
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: *streamErr}
+					return
+				}
 				if gjson.GetBytes(data, "type").String() == "response.completed" {
 					if detail, ok := parseCodexUsage(data); ok {
 						reporter.publish(ctx, detail)
@@ -763,6 +773,47 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		return &retryAfter
 	}
 	return nil
+}
+
+func parseCodexStreamStatusErr(event []byte, now time.Time) *statusErr {
+	trimmed := bytes.TrimSpace(event)
+	if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
+		return nil
+	}
+
+	eventType := strings.TrimSpace(gjson.GetBytes(trimmed, "type").String())
+	status := int(gjson.GetBytes(trimmed, "status").Int())
+	errNode := gjson.GetBytes(trimmed, "error")
+	hasErrorNode := errNode.Exists() && errNode.Type != gjson.Null
+	errType := strings.TrimSpace(errNode.Get("type").String())
+	isUsageLimit := strings.EqualFold(errType, "usage_limit_reached")
+
+	if status <= 0 && isUsageLimit {
+		status = http.StatusTooManyRequests
+	}
+	if status <= 0 && hasErrorNode {
+		switch {
+		case eventType == "error":
+			status = http.StatusInternalServerError
+		case strings.HasSuffix(eventType, ".failed"):
+			status = http.StatusInternalServerError
+		case strings.HasSuffix(eventType, ".error"):
+			status = http.StatusInternalServerError
+		}
+	}
+	if status < http.StatusBadRequest {
+		return nil
+	}
+
+	err := statusErr{code: status, msg: string(trimmed)}
+	retryStatus := status
+	if isUsageLimit {
+		retryStatus = http.StatusTooManyRequests
+	}
+	if retryAfter := parseCodexRetryAfter(retryStatus, trimmed, now); retryAfter != nil {
+		err.retryAfter = retryAfter
+	}
+	return &err
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

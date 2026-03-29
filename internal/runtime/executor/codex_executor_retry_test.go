@@ -91,6 +91,52 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 }
 
+func TestParseCodexStreamStatusErr(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	t.Run("usage_limit_with_resets_in_seconds", func(t *testing.T) {
+		event := []byte(`{"type":"error","error":{"type":"usage_limit_reached","resets_in_seconds":120}}`)
+		err := parseCodexStreamStatusErr(event, now)
+		if err == nil {
+			t.Fatalf("expected status error, got nil")
+		}
+		if got := err.StatusCode(); got != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+		}
+		if err.RetryAfter() == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *err.RetryAfter() != 120*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *err.RetryAfter(), 120*time.Second)
+		}
+	})
+
+	t.Run("usage_limit_with_resets_at", func(t *testing.T) {
+		resetAt := now.Add(3 * time.Minute).Unix()
+		event := []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `}}`)
+		err := parseCodexStreamStatusErr(event, now)
+		if err == nil {
+			t.Fatalf("expected status error, got nil")
+		}
+		if got := err.StatusCode(); got != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+		}
+		if err.RetryAfter() == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *err.RetryAfter() != 3*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v", *err.RetryAfter(), 3*time.Minute)
+		}
+	})
+
+	t.Run("non_error_event", func(t *testing.T) {
+		event := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+		if got := parseCodexStreamStatusErr(event, now); got != nil {
+			t.Fatalf("expected nil, got %+v", *got)
+		}
+	})
+}
+
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
