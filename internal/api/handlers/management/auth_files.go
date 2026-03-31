@@ -2860,7 +2860,7 @@ func (h *Handler) getCodexQuotaInfo(auth *coreauth.Auth) gin.H {
 			}
 			rateLimit["primary_window"] = window
 		}
-		if quotaInfo.RateLimit.SecondaryWindow != nil {
+		if quotaInfo.RateLimit.PrimaryWindow != nil && quotaInfo.RateLimit.SecondaryWindow != nil {
 			window := gin.H{
 				"used_percent":         quotaInfo.RateLimit.SecondaryWindow.UsedPercent,
 				"limit_window_seconds": quotaInfo.RateLimit.SecondaryWindow.LimitWindowSeconds,
@@ -2886,7 +2886,7 @@ func (h *Handler) getCodexQuotaInfo(auth *coreauth.Auth) gin.H {
 			}
 			codeReview["primary_window"] = window
 		}
-		if quotaInfo.CodeReviewRateLimit.SecondaryWindow != nil {
+		if quotaInfo.CodeReviewRateLimit.PrimaryWindow != nil && quotaInfo.CodeReviewRateLimit.SecondaryWindow != nil {
 			window := gin.H{
 				"used_percent":         quotaInfo.CodeReviewRateLimit.SecondaryWindow.UsedPercent,
 				"limit_window_seconds": quotaInfo.CodeReviewRateLimit.SecondaryWindow.LimitWindowSeconds,
