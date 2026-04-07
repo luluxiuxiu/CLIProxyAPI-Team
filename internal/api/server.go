@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -1254,6 +1255,7 @@ func (f *codexQuotaFetcherImpl) persistCodexQuota(ctx context.Context, authEntry
 			AccessToken: strings.TrimSpace(authEntry.AccessToken),
 		}
 		clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
+		clone.Attributes, clone.Metadata = codex.SyncPlanType(clone.Attributes, clone.Metadata, quotaInfo.PlanType)
 		updated, errUpdate := f.authManager.Update(ctx, clone)
 		if errUpdate != nil {
 			log.WithError(errUpdate).Debugf("Codex quota auto-refresh persistence failed for auth %s", authEntry.AuthIndex)

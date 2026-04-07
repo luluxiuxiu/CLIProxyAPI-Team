@@ -208,10 +208,10 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
-func TestSchedulerPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
+func TestSchedulerPick_CodexAlwaysPrefersPaidPlan(t *testing.T) {
 	t.Parallel()
 
-	model := "gpt-5.4"
+	model := "gpt-4.1"
 	registerSchedulerModels(t, "codex", model, "gpt54-free", "gpt54-paid")
 	scheduler := newSchedulerForTest(
 		&FillFirstSelector{},
@@ -228,6 +228,66 @@ func TestSchedulerPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
 	}
 	if got.ID != "gpt54-paid" {
 		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "gpt54-paid")
+	}
+}
+
+func TestSchedulerPick_CodexJWTPlanOverridesStaleFreeMetadata(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-4.1"
+	registerSchedulerModels(t, "codex", model, "jwt-paid", "plain-free")
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		&Auth{
+			ID:       "jwt-paid",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"plan_type": "free",
+				"id_token":  codexPlanTestIDToken("plus"),
+			},
+		},
+		&Auth{ID: "plain-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "jwt-paid" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "jwt-paid")
+	}
+}
+
+func TestSchedulerPick_CodexQuotaPlanOverridesStaleJWTFree(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-4.1"
+	registerSchedulerModels(t, "codex", model, "quota-paid", "plain-free")
+	quotaPaid := &Auth{
+		ID:       "quota-paid",
+		Provider: "codex",
+		Metadata: codexQuotaPlanTestMetadata("plus", true, false, 9, time.Now().Add(10*time.Minute).Unix()),
+	}
+	quotaPaid.Metadata["plan_type"] = "free"
+	quotaPaid.Metadata["id_token"] = codexPlanTestIDToken("free")
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		quotaPaid,
+		&Auth{ID: "plain-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "quota-paid" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "quota-paid")
 	}
 }
 

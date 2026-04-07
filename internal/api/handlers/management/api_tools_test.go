@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -208,5 +210,51 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestPersistCodexQuotaSnapshotSyncsPlanTypeToAuth(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"plan_type": "free",
+		},
+		Attributes: map[string]string{
+			"plan_type": "free",
+		},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register codex auth: %v", errRegister)
+	}
+
+	h := &Handler{
+		authManager:       manager,
+		codexQuotaManager: quota.NewCodexQuotaManager(time.Minute),
+	}
+
+	quotaInfo := &quota.CodexQuotaInfo{PlanType: "plus"}
+	h.persistCodexQuotaSnapshot(context.Background(), registered, registered.Index, "acct-1", "token-1", quotaInfo)
+
+	updated := h.authByIndex(registered.Index)
+	if updated == nil {
+		t.Fatal("expected updated auth")
+	}
+	if got := updated.Metadata["plan_type"]; got != "plus" {
+		t.Fatalf("metadata plan_type = %v, want plus", got)
+	}
+	if got := updated.Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("attributes plan_type = %q, want plus", got)
+	}
+	entry, ok := quota.ReadQuotaFromMetadata(updated.Metadata)
+	if !ok || entry == nil || entry.QuotaInfo == nil {
+		t.Fatal("expected persisted codex quota cache entry")
+	}
+	if entry.QuotaInfo.PlanType != "plus" {
+		t.Fatalf("quota cache plan_type = %q, want plus", entry.QuotaInfo.PlanType)
 	}
 }

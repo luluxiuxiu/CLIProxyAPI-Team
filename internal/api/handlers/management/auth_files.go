@@ -504,21 +504,10 @@ func (h *Handler) codexPlanEntry(auth *coreauth.Auth) gin.H {
 }
 
 func codexPlanTypeFromAuth(auth *coreauth.Auth) string {
-	if auth == nil || auth.Metadata == nil {
+	if auth == nil {
 		return ""
 	}
-	if v, ok := auth.Metadata["plan_type"].(string); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	if raw, ok := auth.Metadata["id_token"].(string); ok {
-		claims, err := codex.ParseJWTToken(strings.TrimSpace(raw))
-		if err == nil && claims != nil {
-			return strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-		}
-	}
-	return ""
+	return codex.ResolvePlanType(auth.Attributes, auth.Metadata)
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -545,8 +534,15 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
 		result["chatgpt_account_id"] = v
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
+	rawPlanType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+	resolvedPlanType := codexPlanTypeFromAuth(auth)
+	if resolvedPlanType != "" {
+		result["plan_type"] = resolvedPlanType
+		if rawPlanType != "" && codex.NormalizePlanType(rawPlanType) != codex.NormalizePlanType(resolvedPlanType) {
+			result["raw_plan_type"] = rawPlanType
+		}
+	} else if rawPlanType != "" {
+		result["plan_type"] = rawPlanType
 	}
 	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
 		result["chatgpt_subscription_active_start"] = v

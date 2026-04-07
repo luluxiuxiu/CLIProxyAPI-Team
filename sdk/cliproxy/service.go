@@ -1301,20 +1301,7 @@ func codexPlanFromAuth(auth *coreauth.Auth) (string, string) {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return "", "unknown"
 	}
-	planType := ""
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["plan_type"].(string); ok {
-			planType = strings.TrimSpace(v)
-		}
-		if planType == "" {
-			if raw, ok := auth.Metadata["id_token"].(string); ok {
-				claims, err := codex.ParseJWTToken(strings.TrimSpace(raw))
-				if err == nil && claims != nil {
-					planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-				}
-			}
-		}
-	}
+	planType := codex.ResolvePlanType(auth.Attributes, auth.Metadata)
 	return planType, codex.PlanCategory(planType)
 }
 

@@ -45,11 +45,6 @@ const (
 	codexFreePriorityBoost = 500_000
 )
 
-var paidFirstCodexModels = map[string]struct{}{
-	"gpt-5.3-codex": {},
-	"gpt-5.4":       {},
-}
-
 type modelCooldownError struct {
 	model    string
 	resetIn  time.Duration
@@ -134,39 +129,18 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
-func shouldPreferPaidCodexPlan(model string) bool {
-	_, ok := paidFirstCodexModels[canonicalModelKey(model)]
-	return ok
-}
-
 func codexPlanCategoryFromAuth(auth *Auth) string {
 	if auth == nil {
 		return "unknown"
 	}
 
-	planType := ""
-	if auth.Attributes != nil {
-		planType = strings.TrimSpace(auth.Attributes["plan_type"])
-	}
-	if planType == "" && auth.Metadata != nil {
-		if raw, ok := auth.Metadata["plan_type"].(string); ok {
-			planType = strings.TrimSpace(raw)
-		}
-	}
-	if planType == "" && auth.Metadata != nil {
-		if raw, ok := auth.Metadata["id_token"].(string); ok {
-			claims, err := codexauth.ParseJWTToken(strings.TrimSpace(raw))
-			if err == nil && claims != nil {
-				planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			}
-		}
-	}
+	planType := codexauth.ResolvePlanType(auth.Attributes, auth.Metadata)
 	return codexauth.PlanCategory(planType)
 }
 
 func authSelectionPriority(auth *Auth, model string) int {
 	priority := authPriority(auth)
-	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || !shouldPreferPaidCodexPlan(model) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return priority
 	}
 

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,9 +14,37 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
+func codexPlanTestIDToken(planType string) string {
+	payload := map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": planType,
+		},
+	}
+	encoded, _ := json.Marshal(payload)
+	return "e30." + base64.RawURLEncoding.EncodeToString(encoded) + ".sig"
+}
+
 func codexQuotaTestMetadata(allowed bool, limitReached bool, usedPercent int, resetAt int64) map[string]any {
 	return quota.PersistQuotaToMetadata(nil, &quota.CodexQuotaCacheEntry{
 		QuotaInfo: &quota.CodexQuotaInfo{
+			RateLimit: &quota.RateLimitInfo{
+				Allowed:      allowed,
+				LimitReached: limitReached,
+				PrimaryWindow: &quota.LimitWindow{
+					UsedPercent: usedPercent,
+					ResetAt:     resetAt,
+				},
+			},
+		},
+		FetchedAt: time.Now(),
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	})
+}
+
+func codexQuotaPlanTestMetadata(planType string, allowed bool, limitReached bool, usedPercent int, resetAt int64) map[string]any {
+	return quota.PersistQuotaToMetadata(nil, &quota.CodexQuotaCacheEntry{
+		QuotaInfo: &quota.CodexQuotaInfo{
+			PlanType: planType,
 			RateLimit: &quota.RateLimitInfo{
 				Allowed:      allowed,
 				LimitReached: limitReached,
@@ -149,7 +178,7 @@ func TestRoundRobinSelectorPick_MixedCodexCandidatesPreferHigherQuota(t *testing
 	}
 }
 
-func TestFillFirstSelectorPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
+func TestFillFirstSelectorPick_CodexAlwaysPrefersPaidPlan(t *testing.T) {
 	t.Parallel()
 
 	selector := &FillFirstSelector{}
@@ -158,7 +187,7 @@ func TestFillFirstSelectorPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
 		{ID: "paid", Provider: "codex", Attributes: map[string]string{"priority": "0", "plan_type": "plus"}},
 	}
 
-	got, err := selector.Pick(context.Background(), "codex", "gpt-5.4", cliproxyexecutor.Options{}, auths)
+	got, err := selector.Pick(context.Background(), "codex", "gpt-4.1", cliproxyexecutor.Options{}, auths)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -167,6 +196,61 @@ func TestFillFirstSelectorPick_TargetCodexModelsPreferPaidPlan(t *testing.T) {
 	}
 	if got.ID != "paid" {
 		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "paid")
+	}
+}
+
+func TestFillFirstSelectorPick_CodexJWTPlanOverridesStaleFreeMetadata(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{
+			ID:       "paid-from-jwt",
+			Provider: "codex",
+			Metadata: map[string]any{
+				"plan_type": "free",
+				"id_token":  codexPlanTestIDToken("team"),
+			},
+		},
+		{ID: "free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-4.1", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "paid-from-jwt" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "paid-from-jwt")
+	}
+}
+
+func TestFillFirstSelectorPick_CodexQuotaPlanOverridesStaleJWTFree(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	auths := []*Auth{
+		{
+			ID:       "paid-from-quota",
+			Provider: "codex",
+			Metadata: codexQuotaPlanTestMetadata("plus", true, false, 5, time.Now().Add(10*time.Minute).Unix()),
+		},
+		{ID: "free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}},
+	}
+	auths[0].Metadata["plan_type"] = "free"
+	auths[0].Metadata["id_token"] = codexPlanTestIDToken("free")
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-4.1", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "paid-from-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "paid-from-quota")
 	}
 }
 

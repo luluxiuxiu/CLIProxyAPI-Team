@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
@@ -302,6 +303,7 @@ func (h *Handler) persistCodexQuotaSnapshot(ctx context.Context, auth *coreauth.
 
 	clone := target.Clone()
 	clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
+	clone.Attributes, clone.Metadata = codex.SyncPlanType(clone.Attributes, clone.Metadata, quotaInfo.PlanType)
 	updated, errUpdate := h.authManager.Update(ctx, clone)
 	if errUpdate != nil {
 		log.WithError(errUpdate).Debugf("Codex quota persistence failed for auth %s", target.Index)
