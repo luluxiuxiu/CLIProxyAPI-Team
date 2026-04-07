@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -29,6 +32,102 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
+	}
+}
+
+func TestCodexWebsocketsExecutorExecutePreservesPreviousResponseID(t *testing.T) {
+	t.Parallel()
+
+	requestBodies := make(chan []byte, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer conn.Close()
+
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		requestBodies <- body
+
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_test","object":"response","created_at":1700000000,"status":"completed","error":null,"output":[{"type":"message","id":"msg_test","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}`)); err != nil {
+			t.Fatalf("write websocket message: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","previous_response_id":"resp_prev","input":[]}`),
+	}
+
+	_, err := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	body := <-requestBodies
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
+		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
+	}
+}
+
+func TestCodexWebsocketsExecutorExecuteStreamPreservesPreviousResponseID(t *testing.T) {
+	t.Parallel()
+
+	requestBodies := make(chan []byte, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade websocket: %v", err)
+		}
+		defer conn.Close()
+
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read websocket message: %v", err)
+		}
+		requestBodies <- body
+
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_test","object":"response","created_at":1700000000,"status":"completed","error":null,"output":[]}}`)); err != nil {
+			t.Fatalf("write websocket message: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","previous_response_id":"resp_prev","input":[]}`),
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream returned error: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	body := <-requestBodies
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
+		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
 	}
 }
 
