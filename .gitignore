@@ -33,12 +33,12 @@ GEMINI.md
 
 # Tooling metadata
 .vscode/*
+.worktrees/
 .codex/*
 .claude/*
 .gemini/*
 .serena/*
 .agent/*
-.agents/*
 .agents/*
 .opencode/*
 .idea/*
@@ -52,3 +52,9 @@ _bmad-output/*
 
 # Terminal Paste Image folder
 .cp-images/
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/
