@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestListAuthFiles_RefreshesCodexQuotaBeforeResponding(t *testing.T) {
+func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
@@ -39,6 +40,23 @@ func TestListAuthFiles_RefreshesCodexQuotaBeforeResponding(t *testing.T) {
 			"account_id":   "acct-1",
 		},
 	}
+	auth.Metadata = quota.PersistQuotaToMetadata(auth.Metadata, &quota.CodexQuotaCacheEntry{
+		QuotaInfo: &quota.CodexQuotaInfo{
+			AccountID: "acct-1",
+			Email:     "cached@example.com",
+			PlanType:  "free",
+			RateLimit: &quota.RateLimitInfo{
+				Allowed: true,
+				PrimaryWindow: &quota.LimitWindow{
+					UsedPercent: 25,
+				},
+			},
+		},
+		FetchedAt:   time.Now().Add(-authFilesCodexQuotaRefreshCooldown - time.Second),
+		ExpiresAt:   time.Now().Add(5 * time.Minute),
+		AccountID:   "acct-1",
+		AccessToken: "token-1",
+	})
 	registered, errRegister := manager.Register(context.Background(), auth)
 	if errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
@@ -48,15 +66,22 @@ func TestListAuthFiles_RefreshesCodexQuotaBeforeResponding(t *testing.T) {
 	h.codexQuotaManager = quota.NewCodexQuotaManager(time.Minute)
 
 	originalFetcher := fetchCodexQuotaForAuth
-	fetchCalls := 0
+	var fetchCalls atomic.Int32
+	fetchStarted := make(chan struct{}, 1)
+	releaseFetch := make(chan struct{})
 	fetchCodexQuotaForAuth = func(ctx context.Context, accessToken, accountID, proxyURL string) (*quota.CodexQuotaInfo, error) {
-		fetchCalls++
+		fetchCalls.Add(1)
 		if accessToken != "token-1" {
 			t.Fatalf("access token = %q, want token-1", accessToken)
 		}
 		if accountID != "acct-1" {
 			t.Fatalf("account id = %q, want acct-1", accountID)
 		}
+		select {
+		case fetchStarted <- struct{}{}:
+		default:
+		}
+		<-releaseFetch
 		return &quota.CodexQuotaInfo{
 			AccountID: "acct-1",
 			Email:     "user@example.com",
@@ -81,13 +106,29 @@ func TestListAuthFiles_RefreshesCodexQuotaBeforeResponding(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
 
-	h.ListAuthFiles(ctx)
+	done := make(chan struct{})
+	go func() {
+		h.ListAuthFiles(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		close(releaseFetch)
+		t.Fatal("ListAuthFiles blocked waiting for quota refresh")
+	}
 
 	if rec.Code != http.StatusOK {
+		close(releaseFetch)
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if fetchCalls != 1 {
-		t.Fatalf("fetch calls = %d, want 1", fetchCalls)
+
+	select {
+	case <-fetchStarted:
+	case <-time.After(time.Second):
+		close(releaseFetch)
+		t.Fatal("expected background quota refresh to start")
 	}
 
 	var payload struct {
@@ -120,28 +161,34 @@ func TestListAuthFiles_RefreshesCodexQuotaBeforeResponding(t *testing.T) {
 	if file.AuthIndex != registered.Index {
 		t.Fatalf("auth index = %q, want %q", file.AuthIndex, registered.Index)
 	}
-	if file.CodexQuota.Email != "user@example.com" {
-		t.Fatalf("quota email = %q, want user@example.com", file.CodexQuota.Email)
+	if file.CodexQuota.Email != "cached@example.com" {
+		close(releaseFetch)
+		t.Fatalf("quota email = %q, want cached@example.com", file.CodexQuota.Email)
 	}
 	if file.CodexQuota.PlanType != "free" {
 		t.Fatalf("quota plan_type = %q, want free", file.CodexQuota.PlanType)
 	}
-	if file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent != 100 {
-		t.Fatalf("used_percent = %d, want 100", file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent)
+	if file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent != 25 {
+		close(releaseFetch)
+		t.Fatalf("used_percent = %d, want 25", file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent)
 	}
 
-	updated := h.authByIndex(registered.Index)
-	if updated == nil {
-		t.Fatal("expected updated auth")
+	close(releaseFetch)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		updated := h.authByIndex(registered.Index)
+		if updated != nil {
+			entry, ok := quota.ReadQuotaFromMetadata(updated.Metadata)
+			if ok && entry != nil && entry.QuotaInfo != nil && entry.QuotaInfo.RateLimit != nil && entry.QuotaInfo.RateLimit.PrimaryWindow != nil && entry.QuotaInfo.RateLimit.PrimaryWindow.UsedPercent == 100 {
+				if fetchCalls.Load() != 1 {
+					t.Fatalf("fetch calls = %d, want 1", fetchCalls.Load())
+				}
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	entry, ok := quota.ReadQuotaFromMetadata(updated.Metadata)
-	if !ok || entry == nil || entry.QuotaInfo == nil {
-		t.Fatal("expected persisted quota entry in metadata")
-	}
-	if entry.QuotaInfo.RateLimit == nil || entry.QuotaInfo.RateLimit.PrimaryWindow == nil {
-		t.Fatal("expected persisted primary window")
-	}
-	if entry.QuotaInfo.RateLimit.PrimaryWindow.UsedPercent != 100 {
-		t.Fatalf("persisted used_percent = %d, want 100", entry.QuotaInfo.RateLimit.PrimaryWindow.UsedPercent)
-	}
+
+	t.Fatal("expected quota metadata to be updated asynchronously")
 }

@@ -50,6 +50,11 @@ const (
 	codexCallbackPort     = 1455
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
+
+	authFilesCodexQuotaRefreshBatchSize  = 2
+	authFilesCodexQuotaRefreshBatchPause = 300 * time.Millisecond
+	authFilesCodexQuotaRefreshCooldown   = 2 * time.Minute
+	authFilesCodexQuotaRefreshTimeout    = 15 * time.Second
 )
 
 type callbackForwarder struct {
@@ -250,7 +255,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
-	h.refreshCodexQuotaForList(c.Request.Context(), auths)
+	h.refreshCodexQuotaForList(auths)
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
@@ -272,15 +277,7 @@ func CodexQuotaEntryFromAuth(auth *coreauth.Auth, quotaManager *quota.CodexQuota
 	}
 
 	auth.EnsureIndex()
-	if quotaManager != nil {
-		if cached := quotaManager.GetQuota(auth.Index); cached == nil {
-			if restoredEntry, ok := quota.ReadQuotaFromMetadata(auth.Metadata); ok {
-				if quotaManager.RestoreCache(auth.Index, restoredEntry) {
-					log.Debugf("Codex quota cache restored from metadata for auth %s", auth.Index)
-				}
-			}
-		}
-	}
+	restoreCodexQuotaCacheFromMetadata(auth, quotaManager)
 
 	return quota.CodexAuthEntry{
 		AuthIndex:   auth.Index,
@@ -342,41 +339,123 @@ func UpdateAndPersistCodexQuota(ctx context.Context, authManager *coreauth.Manag
 	return nil, nil
 }
 
-func (h *Handler) refreshCodexQuotaForList(ctx context.Context, auths []*coreauth.Auth) {
+func restoreCodexQuotaCacheFromMetadata(auth *coreauth.Auth, quotaManager *quota.CodexQuotaManager) *quota.CodexQuotaCacheEntry {
+	if auth == nil || quotaManager == nil {
+		return nil
+	}
+
+	auth.EnsureIndex()
+	if auth.Index == "" {
+		return nil
+	}
+
+	if cached := quotaManager.GetQuota(auth.Index); cached != nil && cached.QuotaInfo != nil {
+		return cached
+	}
+
+	restoredEntry, ok := quota.ReadQuotaFromMetadata(auth.Metadata)
+	if !ok {
+		return nil
+	}
+	if quotaManager.RestoreCache(auth.Index, restoredEntry) {
+		log.Debugf("Codex quota cache restored from metadata for auth %s", auth.Index)
+	}
+	return quotaManager.GetQuota(auth.Index)
+}
+
+func (h *Handler) refreshCodexQuotaForList(auths []*coreauth.Auth) {
 	if h == nil || h.authManager == nil || h.codexQuotaManager == nil || len(auths) == 0 {
 		return
 	}
 
-	const maxConcurrentRefreshes = 4
-	sem := make(chan struct{}, maxConcurrentRefreshes)
-	var wg sync.WaitGroup
-
-	for _, auth := range auths {
-		if !shouldRefreshCodexQuota(auth) {
-			continue
-		}
-
-		wg.Add(1)
-		go func(currentAuth *coreauth.Auth) {
-			defer wg.Done()
-
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-
-			refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-
-			if err := h.refreshCodexQuotaSnapshot(refreshCtx, currentAuth); err != nil {
-				log.WithError(err).Debugf("codex quota refresh before auth-files response failed for auth %s", currentAuth.Index)
-			}
-		}(auth)
+	pending := h.markCodexQuotaRefreshPending(auths)
+	if len(pending) == 0 {
+		return
 	}
 
-	wg.Wait()
+	go h.runCodexQuotaRefreshBatches(pending)
+}
+
+func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth) []*coreauth.Auth {
+	if h == nil {
+		return nil
+	}
+
+	h.codexQuotaRefreshMu.Lock()
+	defer h.codexQuotaRefreshMu.Unlock()
+
+	pending := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if !h.shouldScheduleCodexQuotaRefresh(auth) {
+			continue
+		}
+		auth.EnsureIndex()
+		if _, exists := h.codexQuotaRefreshing[auth.Index]; exists {
+			continue
+		}
+		h.codexQuotaRefreshing[auth.Index] = struct{}{}
+		pending = append(pending, auth.Clone())
+	}
+
+	return pending
+}
+
+func (h *Handler) shouldScheduleCodexQuotaRefresh(auth *coreauth.Auth) bool {
+	if h == nil || h.codexQuotaManager == nil || !shouldRefreshCodexQuota(auth) {
+		return false
+	}
+
+	cached := restoreCodexQuotaCacheFromMetadata(auth, h.codexQuotaManager)
+	if cached == nil || cached.QuotaInfo == nil {
+		return true
+	}
+	if cached.IsExpired() {
+		return true
+	}
+	if cached.FetchedAt.IsZero() {
+		return true
+	}
+	return time.Since(cached.FetchedAt) >= authFilesCodexQuotaRefreshCooldown
+}
+
+func (h *Handler) finishCodexQuotaRefresh(authIndex string) {
+	if h == nil || strings.TrimSpace(authIndex) == "" {
+		return
+	}
+
+	h.codexQuotaRefreshMu.Lock()
+	delete(h.codexQuotaRefreshing, authIndex)
+	h.codexQuotaRefreshMu.Unlock()
+}
+
+func (h *Handler) runCodexQuotaRefreshBatches(auths []*coreauth.Auth) {
+	for start := 0; start < len(auths); start += authFilesCodexQuotaRefreshBatchSize {
+		end := start + authFilesCodexQuotaRefreshBatchSize
+		if end > len(auths) {
+			end = len(auths)
+		}
+
+		var wg sync.WaitGroup
+		for _, auth := range auths[start:end] {
+			wg.Add(1)
+			go func(currentAuth *coreauth.Auth) {
+				defer wg.Done()
+				defer h.finishCodexQuotaRefresh(currentAuth.Index)
+
+				refreshCtx, cancel := context.WithTimeout(context.Background(), authFilesCodexQuotaRefreshTimeout)
+				defer cancel()
+
+				if err := h.refreshCodexQuotaSnapshot(refreshCtx, currentAuth); err != nil {
+					log.WithError(err).Debugf("async codex quota refresh after auth-files response failed for auth %s", currentAuth.Index)
+				}
+			}(auth)
+		}
+
+		wg.Wait()
+		if end < len(auths) {
+			time.Sleep(authFilesCodexQuotaRefreshBatchPause)
+		}
+	}
 }
 
 func shouldRefreshCodexQuota(auth *coreauth.Auth) bool {
@@ -3106,7 +3185,7 @@ func (h *Handler) getCodexQuotaInfo(auth *coreauth.Auth) gin.H {
 	}
 
 	auth.EnsureIndex()
-	cached := h.codexQuotaManager.GetQuota(auth.Index)
+	cached := restoreCodexQuotaCacheFromMetadata(auth, h.codexQuotaManager)
 	if cached == nil || cached.QuotaInfo == nil {
 		return nil
 	}

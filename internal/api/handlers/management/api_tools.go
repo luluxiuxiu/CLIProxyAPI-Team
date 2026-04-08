@@ -134,13 +134,25 @@ func (h *Handler) APICall(c *gin.Context) {
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
-	// Check if this is a Codex quota request and if we have cached quota data
+	// Check if this is a Codex quota request and if we have cached quota data.
+	// Even on cache hit, sync the snapshot back into auth storage so auth-files
+	// reads metadata/plan fields from the same freshest in-memory view.
 	isCodexQuotaRequest := strings.Contains(strings.ToLower(urlStr), "/backend-api/wham/usage")
 	if isCodexQuotaRequest && h.codexQuotaManager != nil && authIndex != "" {
 		if cachedQuota := h.codexQuotaManager.GetQuota(authIndex); cachedQuota != nil && !cachedQuota.IsExpired() {
-			// Return cached quota data
 			quotaJSON, errMarshal := json.Marshal(cachedQuota.QuotaInfo)
 			if errMarshal == nil {
+				accessToken := cachedQuota.AccessToken
+				accountID := cachedQuota.AccountID
+				if auth != nil {
+					if accessToken == "" {
+						accessToken = tokenValueForAuth(auth)
+					}
+					if accountID == "" {
+						accountID = codexAccountIDFromAuth(auth)
+					}
+				}
+				h.persistCodexQuotaSnapshot(c.Request.Context(), auth, authIndex, accountID, accessToken, cachedQuota.QuotaInfo)
 				log.Debugf("Codex quota cache hit for auth %s", authIndex)
 				c.JSON(http.StatusOK, apiCallResponse{
 					StatusCode: http.StatusOK,

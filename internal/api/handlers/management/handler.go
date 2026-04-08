@@ -36,20 +36,22 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	codexQuotaManager   *quota.CodexQuotaManager
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	codexQuotaRefreshMu  sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	codexQuotaManager    *quota.CodexQuotaManager
+	codexQuotaRefreshing map[string]struct{}
 }
 
 // NewHandler creates a new management handler instance.
@@ -58,14 +60,15 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
+		cfg:                  cfg,
+		configFilePath:       configFilePath,
+		failedAttempts:       make(map[string]*attemptInfo),
+		authManager:          manager,
+		usageStats:           usage.GetRequestStatistics(),
+		tokenStore:           sdkAuth.GetTokenStore(),
+		allowRemoteOverride:  envSecret != "",
+		envSecret:            envSecret,
+		codexQuotaRefreshing: make(map[string]struct{}),
 	}
 	h.startAttemptCleanup()
 	return h

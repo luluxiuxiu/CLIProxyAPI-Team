@@ -2,10 +2,14 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -256,5 +260,108 @@ func TestPersistCodexQuotaSnapshotSyncsPlanTypeToAuth(t *testing.T) {
 	}
 	if entry.QuotaInfo.PlanType != "plus" {
 		t.Fatalf("quota cache plan_type = %q, want plus", entry.QuotaInfo.PlanType)
+	}
+}
+
+func TestAPICallCodexQuotaCacheHitSyncsAuthSnapshot(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"account_id":   "acct-1",
+			"plan_type":    "free",
+		},
+		Attributes: map[string]string{
+			"plan_type": "free",
+		},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register codex auth: %v", errRegister)
+	}
+
+	h := &Handler{
+		authManager:       manager,
+		codexQuotaManager: quota.NewCodexQuotaManager(time.Minute),
+	}
+	h.codexQuotaManager.UpdateCache(registered.Index, "acct-1", &quota.CodexQuotaInfo{
+		AccountID: "acct-1",
+		Email:     "fresh@example.com",
+		PlanType:  "plus",
+		RateLimit: &quota.RateLimitInfo{
+			Allowed:      false,
+			LimitReached: true,
+			PrimaryWindow: &quota.LimitWindow{
+				UsedPercent: 100,
+			},
+		},
+	}, "token-1")
+
+	requestBody, errMarshal := json.Marshal(map[string]any{
+		"auth_index": registered.Index,
+		"method":     http.MethodGet,
+		"url":        quota.CodexUsageEndpoint,
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request body: %v", errMarshal)
+	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(string(requestBody)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var response apiCallResponse
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("upstream status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if response.Header["X-Codex-Quota-Cached"][0] != "true" {
+		t.Fatalf("expected cache hit header, got %#v", response.Header)
+	}
+
+	updated := h.authByIndex(registered.Index)
+	if updated == nil {
+		t.Fatal("expected updated auth")
+	}
+	entry, ok := quota.ReadQuotaFromMetadata(updated.Metadata)
+	if !ok || entry == nil || entry.QuotaInfo == nil {
+		t.Fatal("expected persisted codex quota cache entry")
+	}
+	if entry.QuotaInfo.Email != "fresh@example.com" {
+		t.Fatalf("quota cache email = %q, want fresh@example.com", entry.QuotaInfo.Email)
+	}
+	if entry.QuotaInfo.PlanType != "plus" {
+		t.Fatalf("quota cache plan_type = %q, want plus", entry.QuotaInfo.PlanType)
+	}
+	if entry.QuotaInfo.RateLimit == nil || entry.QuotaInfo.RateLimit.PrimaryWindow == nil || entry.QuotaInfo.RateLimit.PrimaryWindow.UsedPercent != 100 {
+		t.Fatalf("quota cache used_percent = %+v, want 100", entry.QuotaInfo.RateLimit)
+	}
+	if updated.Metadata["plan_type"] != "plus" {
+		t.Fatalf("metadata plan_type = %v, want plus", updated.Metadata["plan_type"])
+	}
+	if updated.Attributes["plan_type"] != "plus" {
+		t.Fatalf("attributes plan_type = %q, want plus", updated.Attributes["plan_type"])
+	}
+
+	cached := h.codexQuotaManager.GetQuota(registered.Index)
+	if cached == nil || cached.QuotaInfo == nil || cached.QuotaInfo.Email != "fresh@example.com" {
+		t.Fatal("expected codex quota manager cache to be refreshed")
 	}
 }
