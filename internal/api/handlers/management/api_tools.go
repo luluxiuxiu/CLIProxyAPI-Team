@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
@@ -281,32 +280,18 @@ func (h *Handler) persistCodexQuotaSnapshot(ctx context.Context, auth *coreauth.
 	if h == nil || h.authManager == nil || h.codexQuotaManager == nil || quotaInfo == nil {
 		return
 	}
-	target := auth
-	if target == nil {
-		target = h.authByIndex(authIndex)
+	resolvedAuthIndex := strings.TrimSpace(authIndex)
+	if resolvedAuthIndex == "" && auth != nil {
+		auth.EnsureIndex()
+		resolvedAuthIndex = auth.Index
 	}
-	if target == nil {
-		return
-	}
-
-	target.EnsureIndex()
-	entry := h.codexQuotaManager.GetQuota(target.Index)
-	if entry == nil || entry.QuotaInfo == nil {
-		entry = &quota.CodexQuotaCacheEntry{
-			QuotaInfo:   quotaInfo,
-			FetchedAt:   time.Now(),
-			ExpiresAt:   time.Now().Add(quota.CodexQuotaCacheExpiry),
-			AccountID:   strings.TrimSpace(accountID),
-			AccessToken: strings.TrimSpace(accessToken),
-		}
-	}
-
-	clone := target.Clone()
-	clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
-	clone.Attributes, clone.Metadata = codex.SyncPlanType(clone.Attributes, clone.Metadata, quotaInfo.PlanType)
-	updated, errUpdate := h.authManager.Update(ctx, clone)
+	updated, errUpdate := UpdateAndPersistCodexQuota(ctx, h.authManager, h.codexQuotaManager, quota.CodexAuthEntry{
+		AuthIndex:   resolvedAuthIndex,
+		AccountID:   accountID,
+		AccessToken: accessToken,
+	}, quotaInfo)
 	if errUpdate != nil {
-		log.WithError(errUpdate).Debugf("Codex quota persistence failed for auth %s", target.Index)
+		log.WithError(errUpdate).Debugf("Codex quota persistence failed for auth %s", resolvedAuthIndex)
 		return
 	}
 
@@ -314,7 +299,7 @@ func (h *Handler) persistCodexQuotaSnapshot(ctx context.Context, auth *coreauth.
 	if updated != nil && updated.Attributes != nil {
 		path = strings.TrimSpace(updated.Attributes["path"])
 	}
-	log.Infof("Codex quota snapshot persisted: auth_index=%s path=%s", target.Index, path)
+	log.Infof("Codex quota snapshot persisted: auth_index=%s path=%s", resolvedAuthIndex, path)
 }
 
 func firstNonEmptyString(values ...*string) string {

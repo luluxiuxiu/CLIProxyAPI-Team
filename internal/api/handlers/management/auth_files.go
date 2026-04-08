@@ -31,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -58,10 +59,11 @@ type callbackForwarder struct {
 }
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
+	callbackForwardersMu   sync.Mutex
+	callbackForwarders     = make(map[int]*callbackForwarder)
+	errAuthFileMustBeJSON  = errors.New("auth file must be .json")
+	errAuthFileNotFound    = errors.New("auth file not found")
+	fetchCodexQuotaForAuth = quota.FetchQuotaForAuth
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -248,6 +250,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	h.refreshCodexQuotaForList(c.Request.Context(), auths)
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
@@ -260,6 +263,179 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+// CodexQuotaEntryFromAuth builds a quota refresh entry from a Codex auth record.
+func CodexQuotaEntryFromAuth(auth *coreauth.Auth, quotaManager *quota.CodexQuotaManager) (quota.CodexAuthEntry, bool) {
+	if !shouldRefreshCodexQuota(auth) {
+		return quota.CodexAuthEntry{}, false
+	}
+
+	auth.EnsureIndex()
+	if quotaManager != nil {
+		if cached := quotaManager.GetQuota(auth.Index); cached == nil {
+			if restoredEntry, ok := quota.ReadQuotaFromMetadata(auth.Metadata); ok {
+				if quotaManager.RestoreCache(auth.Index, restoredEntry) {
+					log.Debugf("Codex quota cache restored from metadata for auth %s", auth.Index)
+				}
+			}
+		}
+	}
+
+	return quota.CodexAuthEntry{
+		AuthIndex:   auth.Index,
+		AccountID:   codexAccountIDFromAuth(auth),
+		AccessToken: strings.TrimSpace(tokenValueForAuth(auth)),
+		ProxyURL:    strings.TrimSpace(auth.ProxyURL),
+	}, true
+}
+
+// UpdateAndPersistCodexQuota updates the runtime cache and syncs the snapshot back to auth storage.
+func UpdateAndPersistCodexQuota(ctx context.Context, authManager *coreauth.Manager, quotaManager *quota.CodexQuotaManager, authEntry quota.CodexAuthEntry, quotaInfo *quota.CodexQuotaInfo) (*coreauth.Auth, error) {
+	if quotaManager == nil || quotaInfo == nil {
+		return nil, nil
+	}
+
+	authIndex := strings.TrimSpace(authEntry.AuthIndex)
+	if authIndex == "" {
+		return nil, nil
+	}
+
+	accountID := strings.TrimSpace(authEntry.AccountID)
+	if resolved := strings.TrimSpace(quotaInfo.AccountID); resolved != "" {
+		accountID = resolved
+	}
+	accessToken := strings.TrimSpace(authEntry.AccessToken)
+	quotaManager.UpdateCache(authIndex, accountID, quotaInfo, accessToken)
+
+	if authManager == nil {
+		return nil, nil
+	}
+
+	auths := authManager.List()
+	for _, candidate := range auths {
+		if candidate == nil {
+			continue
+		}
+		candidate.EnsureIndex()
+		if candidate.Index != authIndex {
+			continue
+		}
+
+		entry := quotaManager.GetQuota(authIndex)
+		if entry == nil || entry.QuotaInfo == nil {
+			entry = &quota.CodexQuotaCacheEntry{
+				QuotaInfo:   quotaInfo,
+				FetchedAt:   time.Now(),
+				ExpiresAt:   time.Now().Add(quota.CodexQuotaCacheExpiry),
+				AccountID:   accountID,
+				AccessToken: accessToken,
+			}
+		}
+
+		clone := candidate.Clone()
+		clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
+		clone.Attributes, clone.Metadata = codex.SyncPlanType(clone.Attributes, clone.Metadata, quotaInfo.PlanType)
+		return authManager.Update(ctx, clone)
+	}
+
+	return nil, nil
+}
+
+func (h *Handler) refreshCodexQuotaForList(ctx context.Context, auths []*coreauth.Auth) {
+	if h == nil || h.authManager == nil || h.codexQuotaManager == nil || len(auths) == 0 {
+		return
+	}
+
+	const maxConcurrentRefreshes = 4
+	sem := make(chan struct{}, maxConcurrentRefreshes)
+	var wg sync.WaitGroup
+
+	for _, auth := range auths {
+		if !shouldRefreshCodexQuota(auth) {
+			continue
+		}
+
+		wg.Add(1)
+		go func(currentAuth *coreauth.Auth) {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+
+			if err := h.refreshCodexQuotaSnapshot(refreshCtx, currentAuth); err != nil {
+				log.WithError(err).Debugf("codex quota refresh before auth-files response failed for auth %s", currentAuth.Index)
+			}
+		}(auth)
+	}
+
+	wg.Wait()
+}
+
+func shouldRefreshCodexQuota(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return false
+	}
+	return strings.TrimSpace(tokenValueForAuth(auth)) != ""
+}
+
+func (h *Handler) refreshCodexQuotaSnapshot(ctx context.Context, auth *coreauth.Auth) error {
+	if h == nil || h.codexQuotaManager == nil || auth == nil {
+		return nil
+	}
+
+	entry, ok := CodexQuotaEntryFromAuth(auth, h.codexQuotaManager)
+	if !ok {
+		return nil
+	}
+
+	quotaInfo, errFetchQuota := fetchCodexQuotaForAuth(ctx, entry.AccessToken, entry.AccountID, entry.ProxyURL)
+	if errFetchQuota != nil {
+		return errFetchQuota
+	}
+	if quotaInfo == nil {
+		return nil
+	}
+
+	_, errPersist := UpdateAndPersistCodexQuota(ctx, h.authManager, h.codexQuotaManager, entry, quotaInfo)
+	return errPersist
+}
+
+func codexAccountIDFromAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["account_id"].(string); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if trimmed := strings.TrimSpace(auth.Attributes["account_id"]); trimmed != "" {
+			return trimmed
+		}
+	}
+	claims := extractCodexIDTokenClaims(auth)
+	if claims == nil {
+		return ""
+	}
+	v, _ := claims["chatgpt_account_id"].(string)
+	return strings.TrimSpace(v)
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file

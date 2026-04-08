@@ -24,7 +24,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -38,7 +37,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -1168,51 +1166,11 @@ func (f *codexQuotaFetcherImpl) ListCodexAuths() []quota.CodexAuthEntry {
 	var result []quota.CodexAuthEntry
 
 	for _, auth := range auths {
-		if auth == nil || !strings.EqualFold(auth.Provider, "codex") {
+		entry, ok := managementHandlers.CodexQuotaEntryFromAuth(auth, f.quotaManager)
+		if !ok {
 			continue
 		}
-		if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-			continue
-		}
-
-		// Get access token
-		accessToken := ""
-		if auth.Metadata != nil {
-			if v, ok := auth.Metadata["access_token"].(string); ok {
-				accessToken = strings.TrimSpace(v)
-			}
-		}
-		if accessToken == "" {
-			continue
-		}
-
-		// Get account ID
-		accountID := ""
-		if auth.Metadata != nil {
-			if v, ok := auth.Metadata["account_id"].(string); ok {
-				accountID = strings.TrimSpace(v)
-			}
-		}
-
-		// Get proxy URL
-		proxyURL := strings.TrimSpace(auth.ProxyURL)
-
-		auth.EnsureIndex()
-		if f.quotaManager != nil {
-			if cached := f.quotaManager.GetQuota(auth.Index); cached == nil {
-				if restoredEntry, ok := quota.ReadQuotaFromMetadata(auth.Metadata); ok {
-					if f.quotaManager.RestoreCache(auth.Index, restoredEntry) {
-						log.Debugf("Codex quota cache restored from metadata for auth %s", auth.Index)
-					}
-				}
-			}
-		}
-		result = append(result, quota.CodexAuthEntry{
-			AuthIndex:   auth.Index,
-			AccountID:   accountID,
-			AccessToken: accessToken,
-			ProxyURL:    proxyURL,
-		})
+		result = append(result, entry)
 	}
 
 	return result
@@ -1233,39 +1191,17 @@ func (f *codexQuotaFetcherImpl) FetchQuota(ctx context.Context, auth quota.Codex
 }
 
 func (f *codexQuotaFetcherImpl) persistCodexQuota(ctx context.Context, authEntry quota.CodexAuthEntry, quotaInfo *quota.CodexQuotaInfo) {
-	if f == nil || f.authManager == nil || quotaInfo == nil {
+	if f == nil || quotaInfo == nil {
 		return
 	}
-	auths := f.authManager.List()
-	for _, candidate := range auths {
-		if candidate == nil {
-			continue
-		}
-		candidate.EnsureIndex()
-		if candidate.Index != authEntry.AuthIndex {
-			continue
-		}
-
-		clone := candidate.Clone()
-		entry := &quota.CodexQuotaCacheEntry{
-			QuotaInfo:   quotaInfo,
-			FetchedAt:   time.Now(),
-			ExpiresAt:   time.Now().Add(quota.CodexQuotaCacheExpiry),
-			AccountID:   strings.TrimSpace(authEntry.AccountID),
-			AccessToken: strings.TrimSpace(authEntry.AccessToken),
-		}
-		clone.Metadata = quota.PersistQuotaToMetadata(clone.Metadata, entry)
-		clone.Attributes, clone.Metadata = codex.SyncPlanType(clone.Attributes, clone.Metadata, quotaInfo.PlanType)
-		updated, errUpdate := f.authManager.Update(ctx, clone)
-		if errUpdate != nil {
-			log.WithError(errUpdate).Debugf("Codex quota auto-refresh persistence failed for auth %s", authEntry.AuthIndex)
-			return
-		}
-		path := ""
-		if updated != nil && updated.Attributes != nil {
-			path = strings.TrimSpace(updated.Attributes["path"])
-		}
-		log.Infof("Codex quota auto-refresh persisted: auth_index=%s path=%s", authEntry.AuthIndex, path)
+	updated, errUpdate := managementHandlers.UpdateAndPersistCodexQuota(ctx, f.authManager, f.quotaManager, authEntry, quotaInfo)
+	if errUpdate != nil {
+		log.WithError(errUpdate).Debugf("Codex quota auto-refresh persistence failed for auth %s", authEntry.AuthIndex)
 		return
 	}
+	path := ""
+	if updated != nil && updated.Attributes != nil {
+		path = strings.TrimSpace(updated.Attributes["path"])
+	}
+	log.Infof("Codex quota auto-refresh persisted: auth_index=%s path=%s", authEntry.AuthIndex, path)
 }
