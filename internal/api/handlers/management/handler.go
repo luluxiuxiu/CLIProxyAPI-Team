@@ -137,7 +137,15 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 }
 
 // SetCodexQuotaManager sets the Codex quota manager for caching and periodic refresh.
-func (h *Handler) SetCodexQuotaManager(manager *quota.CodexQuotaManager) { h.codexQuotaManager = manager }
+func (h *Handler) SetCodexQuotaManager(manager *quota.CodexQuotaManager) {
+	h.codexQuotaManager = manager
+}
+
+func setNoStoreHeaders(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+}
 
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.

@@ -24,6 +24,8 @@ type usageImportPayload struct {
 // If SQLite storage is enabled, it returns statistics from the database.
 // Otherwise, it returns in-memory statistics.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	setNoStoreHeaders(c)
+
 	loggerPlugin := usage.GetLoggerPlugin()
 
 	// Try to get statistics from SQLite if available
