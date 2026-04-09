@@ -187,6 +187,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
+	body = sanitizeCodexRequestBody(body)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -398,6 +399,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
+	body = sanitizeCodexRequestBody(body)
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -666,9 +668,10 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 		return nil
 	}
 
-	// Match codex-rs websocket v2 semantics: every request is `response.create`.
-	// Incremental follow-up turns continue on the same websocket using
-	// `previous_response_id` + incremental `input`, not `response.append`.
+	body = sanitizeCodexRequestBody(body)
+
+	// Codex websocket upstream only accepts response.create requests without
+	// previous_response_id, so normalize the transport envelope here as well.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		if !hasCodexRequiredField(wsReqBody) {
@@ -689,9 +692,6 @@ func hasCodexRequiredField(body []byte) bool {
 		return false
 	}
 	if gjson.GetBytes(body, "input").Exists() {
-		return true
-	}
-	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
 		return true
 	}
 	if strings.TrimSpace(gjson.GetBytes(body, "prompt").String()) != "" {

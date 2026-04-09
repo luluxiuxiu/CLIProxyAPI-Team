@@ -13,7 +13,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexExecutorExecute_PreservesPreviousResponseID(t *testing.T) {
+func TestCodexExecutorExecute_StripsPreviousResponseID(t *testing.T) {
 	t.Parallel()
 
 	requestBodies := make(chan []byte, 1)
@@ -47,12 +47,12 @@ func TestCodexExecutorExecute_PreservesPreviousResponseID(t *testing.T) {
 	}
 
 	body := <-requestBodies
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
-		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
+	if gjson.GetBytes(body, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", string(body))
 	}
 }
 
-func TestCodexExecutorExecuteStream_PreservesPreviousResponseID(t *testing.T) {
+func TestCodexExecutorExecuteStream_StripsPreviousResponseID(t *testing.T) {
 	t.Parallel()
 
 	requestBodies := make(chan []byte, 1)
@@ -90,8 +90,8 @@ func TestCodexExecutorExecuteStream_PreservesPreviousResponseID(t *testing.T) {
 	}
 
 	body := <-requestBodies
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
-		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
+	if gjson.GetBytes(body, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", string(body))
 	}
 
 	for range stream.Chunks {

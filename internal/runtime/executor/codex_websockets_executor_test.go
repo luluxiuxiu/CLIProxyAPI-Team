@@ -16,7 +16,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
+func TestBuildCodexWebsocketRequestBodyStripsPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
 	wsReqBody := buildCodexWebsocketRequestBody(body)
@@ -24,8 +24,8 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
 	}
-	if got := gjson.GetBytes(wsReqBody, "previous_response_id").String(); got != "resp-1" {
-		t.Fatalf("previous_response_id = %s, want resp-1", got)
+	if gjson.GetBytes(wsReqBody, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", string(wsReqBody))
 	}
 	if gjson.GetBytes(wsReqBody, "input.0.id").String() != "msg-1" {
 		t.Fatalf("input item id mismatch")
@@ -35,7 +35,7 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsExecutorExecutePreservesPreviousResponseID(t *testing.T) {
+func TestCodexWebsocketsExecutorExecuteStripsPreviousResponseID(t *testing.T) {
 	t.Parallel()
 
 	requestBodies := make(chan []byte, 1)
@@ -77,12 +77,12 @@ func TestCodexWebsocketsExecutorExecutePreservesPreviousResponseID(t *testing.T)
 	}
 
 	body := <-requestBodies
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
-		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
+	if gjson.GetBytes(body, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", string(body))
 	}
 }
 
-func TestCodexWebsocketsExecutorExecuteStreamPreservesPreviousResponseID(t *testing.T) {
+func TestCodexWebsocketsExecutorExecuteStreamStripsPreviousResponseID(t *testing.T) {
 	t.Parallel()
 
 	requestBodies := make(chan []byte, 1)
@@ -126,8 +126,8 @@ func TestCodexWebsocketsExecutorExecuteStreamPreservesPreviousResponseID(t *test
 	}
 
 	body := <-requestBodies
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_prev" {
-		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_prev", string(body))
+	if gjson.GetBytes(body, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", string(body))
 	}
 }
 
