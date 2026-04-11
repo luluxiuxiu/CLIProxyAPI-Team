@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -443,5 +444,140 @@ func TestListAuthFiles_WebUIRefererRefreshesPaidCodexQuotaSynchronously(t *testi
 	}
 	if entry.QuotaInfo.Email != "fresh@example.com" {
 		t.Fatalf("persisted quota email = %q, want fresh@example.com", entry.QuotaInfo.Email)
+	}
+}
+
+func TestListAuthFiles_WebUIRefererRefreshesLargePaidCodexSetSynchronously(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	expectedEmails := make(map[string]string)
+	totalAuths := authFilesCodexQuotaWebUIRefreshConcurrency + 9
+
+	for i := 0; i < totalAuths; i++ {
+		fileName := fmt.Sprintf("codex-bulk-%02d-plus.json", i)
+		authPath := filepath.Join(tempDir, fileName)
+		if errWrite := os.WriteFile(authPath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+			t.Fatalf("write auth file %s: %v", fileName, errWrite)
+		}
+
+		accountID := fmt.Sprintf("acct-bulk-%02d", i)
+		accessToken := fmt.Sprintf("token-bulk-%02d", i)
+		expectedEmails[fileName] = fmt.Sprintf("fresh-%s@example.com", accountID)
+
+		auth := &coreauth.Auth{
+			ID:       fmt.Sprintf("codex-bulk-auth-%02d", i),
+			FileName: fileName,
+			Provider: "codex",
+			Attributes: map[string]string{
+				"path": authPath,
+			},
+			Metadata: map[string]any{
+				"access_token": accessToken,
+				"account_id":   accountID,
+			},
+		}
+		auth.Metadata = quota.PersistQuotaToMetadata(auth.Metadata, &quota.CodexQuotaCacheEntry{
+			QuotaInfo: &quota.CodexQuotaInfo{
+				AccountID: accountID,
+				Email:     fmt.Sprintf("stale-%02d@example.com", i),
+				PlanType:  "plus",
+				RateLimit: &quota.RateLimitInfo{
+					Allowed: true,
+					PrimaryWindow: &quota.LimitWindow{
+						UsedPercent: i,
+					},
+				},
+			},
+			FetchedAt:   time.Now(),
+			ExpiresAt:   time.Now().Add(5 * time.Minute),
+			AccountID:   accountID,
+			AccessToken: accessToken,
+		})
+
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", fileName, errRegister)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: tempDir}, manager)
+	h.codexQuotaManager = quota.NewCodexQuotaManager(time.Minute)
+
+	originalFetcher := fetchCodexQuotaForAuth
+	var fetchCalls atomic.Int32
+	fetchCodexQuotaForAuth = func(ctx context.Context, accessToken, accountID, proxyURL string) (*quota.CodexQuotaInfo, error) {
+		fetchCalls.Add(1)
+		return &quota.CodexQuotaInfo{
+			AccountID: accountID,
+			Email:     fmt.Sprintf("fresh-%s@example.com", accountID),
+			PlanType:  "plus",
+			RateLimit: &quota.RateLimitInfo{
+				Allowed: true,
+				PrimaryWindow: &quota.LimitWindow{
+					UsedPercent: 100,
+				},
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		fetchCodexQuotaForAuth = originalFetcher
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request.Header.Set("Referer", "http://localhost:8317/management.html#/auth-files")
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := int(fetchCalls.Load()); got != totalAuths {
+		t.Fatalf("fetch calls = %d, want %d", got, totalAuths)
+	}
+
+	var payload struct {
+		Files []struct {
+			Name       string `json:"name"`
+			AuthIndex  string `json:"auth_index"`
+			CodexQuota struct {
+				Email     string `json:"email"`
+				PlanType  string `json:"plan_type"`
+				FetchedAt string `json:"fetched_at"`
+				RateLimit struct {
+					PrimaryWindow struct {
+						UsedPercent int `json:"used_percent"`
+					} `json:"primary_window"`
+				} `json:"rate_limit"`
+			} `json:"codex_quota"`
+		} `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("decode payload: %v", errUnmarshal)
+	}
+	if len(payload.Files) != totalAuths {
+		t.Fatalf("files len = %d, want %d", len(payload.Files), totalAuths)
+	}
+
+	for _, file := range payload.Files {
+		expectedEmail, ok := expectedEmails[file.Name]
+		if !ok {
+			continue
+		}
+		if file.CodexQuota.Email != expectedEmail {
+			t.Fatalf("quota email for %s = %q, want %q", file.Name, file.CodexQuota.Email, expectedEmail)
+		}
+		if file.CodexQuota.PlanType != "plus" {
+			t.Fatalf("quota plan_type for %s = %q, want plus", file.Name, file.CodexQuota.PlanType)
+		}
+		if file.CodexQuota.FetchedAt == "" {
+			t.Fatalf("expected fetched_at for %s to be populated", file.Name)
+		}
+		if file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent != 100 {
+			t.Fatalf("used_percent for %s = %d, want 100", file.Name, file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent)
+		}
 	}
 }

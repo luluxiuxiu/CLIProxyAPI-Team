@@ -52,11 +52,10 @@ const (
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
 
-	authFilesCodexQuotaRefreshBatchSize  = 2
-	authFilesCodexQuotaRefreshBatchPause = 300 * time.Millisecond
-	authFilesCodexQuotaRefreshCooldown   = 2 * time.Minute
-	authFilesCodexQuotaRefreshTimeout    = 15 * time.Second
-	authFilesCodexQuotaSyncMaxAuths      = 24
+	authFilesCodexQuotaRefreshConcurrency      = 2
+	authFilesCodexQuotaWebUIRefreshConcurrency = 16
+	authFilesCodexQuotaRefreshCooldown         = 2 * time.Minute
+	authFilesCodexQuotaRefreshTimeout          = 15 * time.Second
 )
 
 type callbackForwarder struct {
@@ -394,7 +393,7 @@ func (h *Handler) refreshCodexQuotaForList(auths []*coreauth.Auth) {
 		return
 	}
 
-	go h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, authFilesCodexQuotaRefreshBatchPause)
+	go h.runCodexQuotaRefreshWorkers(pending, authFilesCodexQuotaRefreshConcurrency, authFilesCodexQuotaRefreshTimeout)
 }
 
 func (h *Handler) refreshCodexQuotaForWebUI(auths []*coreauth.Auth) {
@@ -407,12 +406,7 @@ func (h *Handler) refreshCodexQuotaForWebUI(auths []*coreauth.Auth) {
 		return
 	}
 
-	if len(pending) > authFilesCodexQuotaSyncMaxAuths {
-		go h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, authFilesCodexQuotaRefreshBatchPause)
-		return
-	}
-
-	h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, 0)
+	h.runCodexQuotaRefreshWorkers(pending, authFilesCodexQuotaWebUIRefreshConcurrency, authFilesCodexQuotaRefreshTimeout)
 }
 
 func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth, force bool) []*coreauth.Auth {
@@ -473,38 +467,63 @@ func (h *Handler) finishCodexQuotaRefresh(authIndex string) {
 	h.codexQuotaRefreshMu.Unlock()
 }
 
-func (h *Handler) runCodexQuotaRefreshBatches(auths []*coreauth.Auth, batchSize int, batchPause time.Duration) {
-	if batchSize <= 0 {
-		batchSize = authFilesCodexQuotaRefreshBatchSize
+func (h *Handler) runCodexQuotaRefreshWorkers(auths []*coreauth.Auth, concurrency int, perAuthTimeout time.Duration) {
+	if len(auths) == 0 {
+		return
+	}
+	if concurrency <= 0 {
+		concurrency = authFilesCodexQuotaRefreshConcurrency
+	}
+	if perAuthTimeout <= 0 {
+		perAuthTimeout = authFilesCodexQuotaRefreshTimeout
 	}
 
-	for start := 0; start < len(auths); start += batchSize {
-		end := start + batchSize
-		if end > len(auths) {
-			end = len(auths)
+	sort.SliceStable(auths, func(i, j int) bool {
+		nameI := strings.ToLower(strings.TrimSpace(auths[i].FileName))
+		nameJ := strings.ToLower(strings.TrimSpace(auths[j].FileName))
+		if nameI == nameJ {
+			idxI := strings.ToLower(strings.TrimSpace(auths[i].Index))
+			idxJ := strings.ToLower(strings.TrimSpace(auths[j].Index))
+			return idxI < idxJ
 		}
+		return nameI < nameJ
+	})
 
-		var wg sync.WaitGroup
-		for _, auth := range auths[start:end] {
-			wg.Add(1)
-			go func(currentAuth *coreauth.Auth) {
-				defer wg.Done()
-				defer h.finishCodexQuotaRefresh(currentAuth.Index)
+	workerCount := concurrency
+	if workerCount > len(auths) {
+		workerCount = len(auths)
+	}
 
-				refreshCtx, cancel := context.WithTimeout(context.Background(), authFilesCodexQuotaRefreshTimeout)
-				defer cancel()
-
-				if err := h.refreshCodexQuotaSnapshot(refreshCtx, currentAuth); err != nil {
-					log.WithError(err).Debugf("async codex quota refresh after auth-files response failed for auth %s", currentAuth.Index)
+	jobs := make(chan *coreauth.Auth)
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for currentAuth := range jobs {
+				if currentAuth == nil {
+					continue
 				}
-			}(auth)
-		}
 
-		wg.Wait()
-		if batchPause > 0 && end < len(auths) {
-			time.Sleep(batchPause)
-		}
+				func() {
+					defer h.finishCodexQuotaRefresh(currentAuth.Index)
+
+					refreshCtx, cancel := context.WithTimeout(context.Background(), perAuthTimeout)
+					defer cancel()
+
+					if err := h.refreshCodexQuotaSnapshot(refreshCtx, currentAuth); err != nil {
+						log.WithError(err).Debugf("codex quota refresh after auth-files request failed for auth %s", currentAuth.Index)
+					}
+				}()
+			}
+		}()
 	}
+
+	for _, auth := range auths {
+		jobs <- auth
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 func shouldRefreshCodexQuota(auth *coreauth.Auth) bool {
