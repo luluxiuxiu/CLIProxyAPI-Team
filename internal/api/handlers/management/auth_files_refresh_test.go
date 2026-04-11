@@ -17,7 +17,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
+func TestListAuthFiles_RefreshesPaidCodexQuotaAsynchronously(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
@@ -44,7 +44,7 @@ func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
 		QuotaInfo: &quota.CodexQuotaInfo{
 			AccountID: "acct-1",
 			Email:     "cached@example.com",
-			PlanType:  "free",
+			PlanType:  "plus",
 			RateLimit: &quota.RateLimitInfo{
 				Allowed: true,
 				PrimaryWindow: &quota.LimitWindow{
@@ -85,7 +85,7 @@ func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
 		return &quota.CodexQuotaInfo{
 			AccountID: "acct-1",
 			Email:     "user@example.com",
-			PlanType:  "free",
+			PlanType:  "plus",
 			RateLimit: &quota.RateLimitInfo{
 				Allowed:      false,
 				LimitReached: true,
@@ -165,8 +165,8 @@ func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
 		close(releaseFetch)
 		t.Fatalf("quota email = %q, want cached@example.com", file.CodexQuota.Email)
 	}
-	if file.CodexQuota.PlanType != "free" {
-		t.Fatalf("quota plan_type = %q, want free", file.CodexQuota.PlanType)
+	if file.CodexQuota.PlanType != "plus" {
+		t.Fatalf("quota plan_type = %q, want plus", file.CodexQuota.PlanType)
 	}
 	if file.CodexQuota.RateLimit.PrimaryWindow.UsedPercent != 25 {
 		close(releaseFetch)
@@ -191,4 +191,102 @@ func TestListAuthFiles_RefreshesCodexQuotaAsynchronously(t *testing.T) {
 	}
 
 	t.Fatal("expected quota metadata to be updated asynchronously")
+}
+
+func TestListAuthFiles_SkipsFreeCodexQuotaRefresh(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	authPath := filepath.Join(tempDir, "codex-free.json")
+	if errWrite := os.WriteFile(authPath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-free-auth",
+		FileName: "codex-free.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      authPath,
+			"plan_type": "free",
+		},
+		Metadata: map[string]any{
+			"access_token": "token-free",
+			"account_id":   "acct-free",
+			"plan_type":    "free",
+		},
+	}
+	auth.Metadata = quota.PersistQuotaToMetadata(auth.Metadata, &quota.CodexQuotaCacheEntry{
+		QuotaInfo: &quota.CodexQuotaInfo{
+			AccountID: "acct-free",
+			Email:     "free@example.com",
+			PlanType:  "free",
+			RateLimit: &quota.RateLimitInfo{
+				Allowed: true,
+				PrimaryWindow: &quota.LimitWindow{
+					UsedPercent: 10,
+				},
+			},
+		},
+		FetchedAt:   time.Now().Add(-authFilesCodexQuotaRefreshCooldown - time.Second),
+		ExpiresAt:   time.Now().Add(5 * time.Minute),
+		AccountID:   "acct-free",
+		AccessToken: "token-free",
+	})
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: tempDir}, manager)
+	h.codexQuotaManager = quota.NewCodexQuotaManager(time.Minute)
+
+	originalFetcher := fetchCodexQuotaForAuth
+	var fetchCalls atomic.Int32
+	fetchCodexQuotaForAuth = func(ctx context.Context, accessToken, accountID, proxyURL string) (*quota.CodexQuotaInfo, error) {
+		fetchCalls.Add(1)
+		return &quota.CodexQuotaInfo{PlanType: "free"}, nil
+	}
+	t.Cleanup(func() {
+		fetchCodexQuotaForAuth = originalFetcher
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if fetchCalls.Load() != 0 {
+		t.Fatalf("fetch calls = %d, want 0", fetchCalls.Load())
+	}
+
+	var payload struct {
+		Files []struct {
+			Name       string `json:"name"`
+			CodexQuota struct {
+				Email    string `json:"email"`
+				PlanType string `json:"plan_type"`
+			} `json:"codex_quota"`
+		} `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatalf("decode payload: %v", errUnmarshal)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("files len = %d, want 1", len(payload.Files))
+	}
+	if payload.Files[0].Name != "codex-free.json" {
+		t.Fatalf("file name = %q, want codex-free.json", payload.Files[0].Name)
+	}
+	if payload.Files[0].CodexQuota.Email != "free@example.com" {
+		t.Fatalf("quota email = %q, want free@example.com", payload.Files[0].CodexQuota.Email)
+	}
+	if payload.Files[0].CodexQuota.PlanType != "free" {
+		t.Fatalf("quota plan_type = %q, want free", payload.Files[0].CodexQuota.PlanType)
+	}
 }
