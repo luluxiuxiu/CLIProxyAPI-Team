@@ -437,7 +437,7 @@ func (h *Handler) shouldScheduleCodexQuotaRefresh(auth *coreauth.Auth, force boo
 	if h == nil || h.codexQuotaManager == nil || !shouldRefreshCodexQuota(auth) {
 		return false
 	}
-	if codex.PlanCategory(codexPlanTypeFromAuth(auth)) == "free" {
+	if codex.PlanCategory(codexPlanTypeFromAuth(auth)) != "paid" {
 		return false
 	}
 	if force {
