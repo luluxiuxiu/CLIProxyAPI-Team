@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,6 +56,7 @@ const (
 	authFilesCodexQuotaRefreshBatchPause = 300 * time.Millisecond
 	authFilesCodexQuotaRefreshCooldown   = 2 * time.Minute
 	authFilesCodexQuotaRefreshTimeout    = 15 * time.Second
+	authFilesCodexQuotaSyncMaxAuths      = 24
 )
 
 type callbackForwarder struct {
@@ -126,15 +128,30 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 
 func isWebUIRequest(c *gin.Context) bool {
 	raw := strings.TrimSpace(c.Query("is_webui"))
-	if raw == "" {
+	if raw != "" {
+		switch strings.ToLower(raw) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
+
+	if c == nil || c.Request == nil {
 		return false
 	}
-	switch strings.ToLower(raw) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+
+	referer := strings.TrimSpace(c.Request.Referer())
+	if referer == "" {
 		return false
 	}
+
+	parsed, errParse := url.Parse(referer)
+	if errParse != nil {
+		return strings.Contains(strings.ToLower(referer), "/management.html")
+	}
+
+	return strings.EqualFold(strings.TrimSpace(parsed.Path), "/management.html")
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
@@ -255,7 +272,11 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
-	h.refreshCodexQuotaForList(auths)
+	if isWebUIRequest(c) {
+		h.refreshCodexQuotaForWebUI(auths)
+	} else {
+		h.refreshCodexQuotaForList(auths)
+	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
@@ -368,15 +389,33 @@ func (h *Handler) refreshCodexQuotaForList(auths []*coreauth.Auth) {
 		return
 	}
 
-	pending := h.markCodexQuotaRefreshPending(auths)
+	pending := h.markCodexQuotaRefreshPending(auths, false)
 	if len(pending) == 0 {
 		return
 	}
 
-	go h.runCodexQuotaRefreshBatches(pending)
+	go h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, authFilesCodexQuotaRefreshBatchPause)
 }
 
-func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth) []*coreauth.Auth {
+func (h *Handler) refreshCodexQuotaForWebUI(auths []*coreauth.Auth) {
+	if h == nil || h.authManager == nil || h.codexQuotaManager == nil || len(auths) == 0 {
+		return
+	}
+
+	pending := h.markCodexQuotaRefreshPending(auths, true)
+	if len(pending) == 0 {
+		return
+	}
+
+	if len(pending) > authFilesCodexQuotaSyncMaxAuths {
+		go h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, authFilesCodexQuotaRefreshBatchPause)
+		return
+	}
+
+	h.runCodexQuotaRefreshBatches(pending, authFilesCodexQuotaRefreshBatchSize, 0)
+}
+
+func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth, force bool) []*coreauth.Auth {
 	if h == nil {
 		return nil
 	}
@@ -386,7 +425,7 @@ func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth) []*coreau
 
 	pending := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
-		if !h.shouldScheduleCodexQuotaRefresh(auth) {
+		if !h.shouldScheduleCodexQuotaRefresh(auth, force) {
 			continue
 		}
 		auth.EnsureIndex()
@@ -400,12 +439,15 @@ func (h *Handler) markCodexQuotaRefreshPending(auths []*coreauth.Auth) []*coreau
 	return pending
 }
 
-func (h *Handler) shouldScheduleCodexQuotaRefresh(auth *coreauth.Auth) bool {
+func (h *Handler) shouldScheduleCodexQuotaRefresh(auth *coreauth.Auth, force bool) bool {
 	if h == nil || h.codexQuotaManager == nil || !shouldRefreshCodexQuota(auth) {
 		return false
 	}
 	if codex.PlanCategory(codexPlanTypeFromAuth(auth)) == "free" {
 		return false
+	}
+	if force {
+		return true
 	}
 
 	cached := restoreCodexQuotaCacheFromMetadata(auth, h.codexQuotaManager)
@@ -431,9 +473,13 @@ func (h *Handler) finishCodexQuotaRefresh(authIndex string) {
 	h.codexQuotaRefreshMu.Unlock()
 }
 
-func (h *Handler) runCodexQuotaRefreshBatches(auths []*coreauth.Auth) {
-	for start := 0; start < len(auths); start += authFilesCodexQuotaRefreshBatchSize {
-		end := start + authFilesCodexQuotaRefreshBatchSize
+func (h *Handler) runCodexQuotaRefreshBatches(auths []*coreauth.Auth, batchSize int, batchPause time.Duration) {
+	if batchSize <= 0 {
+		batchSize = authFilesCodexQuotaRefreshBatchSize
+	}
+
+	for start := 0; start < len(auths); start += batchSize {
+		end := start + batchSize
 		if end > len(auths) {
 			end = len(auths)
 		}
@@ -455,8 +501,8 @@ func (h *Handler) runCodexQuotaRefreshBatches(auths []*coreauth.Auth) {
 		}
 
 		wg.Wait()
-		if end < len(auths) {
-			time.Sleep(authFilesCodexQuotaRefreshBatchPause)
+		if batchPause > 0 && end < len(auths) {
+			time.Sleep(batchPause)
 		}
 	}
 }
