@@ -153,6 +153,24 @@ func isWebUIRequest(c *gin.Context) bool {
 	return strings.EqualFold(strings.TrimSpace(parsed.Path), "/management.html")
 }
 
+func shouldForceAuthFilesCodexQuotaRefresh(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+
+	raw := strings.TrimSpace(c.Query("refresh_paid_codex_quota"))
+	if raw == "" {
+		return false
+	}
+
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -271,7 +289,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
-	if isWebUIRequest(c) {
+	if shouldForceAuthFilesCodexQuotaRefresh(c) {
 		h.refreshCodexQuotaForWebUI(auths)
 	} else {
 		h.refreshCodexQuotaForList(auths)

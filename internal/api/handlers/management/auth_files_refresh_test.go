@@ -106,6 +106,7 @@ func TestListAuthFiles_RefreshesPaidCodexQuotaAsynchronously(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request.Header.Set("Referer", "http://localhost:8317/management.html#/auth-files")
 
 	done := make(chan struct{})
 	go func() {
@@ -389,7 +390,7 @@ func TestListAuthFiles_SkipsUnknownCodexQuotaRefresh(t *testing.T) {
 	}
 }
 
-func TestListAuthFiles_WebUIRefererRefreshesPaidCodexQuotaSynchronously(t *testing.T) {
+func TestListAuthFiles_ExplicitRefreshPaidCodexQuotaSynchronously(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
@@ -469,7 +470,7 @@ func TestListAuthFiles_WebUIRefererRefreshesPaidCodexQuotaSynchronously(t *testi
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?refresh_paid_codex_quota=1", nil)
 	ctx.Request.Header.Set("Referer", "http://localhost:8317/management.html#/auth-files")
 
 	h.ListAuthFiles(ctx)
@@ -544,7 +545,7 @@ func TestListAuthFiles_WebUIRefererRefreshesPaidCodexQuotaSynchronously(t *testi
 	}
 }
 
-func TestListAuthFiles_WebUIRefererRefreshesLargePaidCodexSetSynchronously(t *testing.T) {
+func TestListAuthFiles_ExplicitRefreshLargePaidCodexSetSynchronously(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
 
@@ -624,7 +625,7 @@ func TestListAuthFiles_WebUIRefererRefreshesLargePaidCodexSetSynchronously(t *te
 
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?refresh_paid_codex_quota=1", nil)
 	ctx.Request.Header.Set("Referer", "http://localhost:8317/management.html#/auth-files")
 
 	h.ListAuthFiles(ctx)

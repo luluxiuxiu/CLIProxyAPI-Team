@@ -96,6 +96,11 @@ func runAutoUpdater(ctx context.Context) {
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
+		if localManagementHTMLExists(staticDir) {
+			log.Debug("management asset auto-updater skipped: local management.html already exists, manual updates only")
+			return
+		}
+
 		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
 	}
 
@@ -175,6 +180,20 @@ func FilePath(configFilePath string) string {
 		return ""
 	}
 	return filepath.Join(dir, ManagementFileName)
+}
+
+func localManagementHTMLExists(staticDir string) bool {
+	staticDir = strings.TrimSpace(staticDir)
+	if staticDir == "" {
+		return false
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(staticDir, managementAssetName))
+	if err != nil {
+		return false
+	}
+
+	return !fileInfo.IsDir()
 }
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
