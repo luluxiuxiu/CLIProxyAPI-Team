@@ -89,7 +89,9 @@ type RequestStatistics struct {
 	failureCount  int64
 	totalTokens   int64
 
-	apis map[string]*apiStats
+	apis                   map[string]*apiStats
+	credentialsBySource    map[string]*credentialStats
+	credentialsByAuthIndex map[string]*credentialStats
 
 	requestsByDay  map[string]int64
 	requestsByHour map[int]int64
@@ -109,6 +111,13 @@ type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
 	Details       []RequestDetail
+}
+
+type credentialStats struct {
+	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
+	Tokens        TokenStats
 }
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
@@ -137,7 +146,9 @@ type StatisticsSnapshot struct {
 	FailureCount  int64 `json:"failure_count"`
 	TotalTokens   int64 `json:"total_tokens"`
 
-	APIs map[string]APISnapshot `json:"apis"`
+	APIs                   map[string]APISnapshot        `json:"apis"`
+	CredentialsBySource    map[string]CredentialSnapshot `json:"credentials_by_source,omitempty"`
+	CredentialsByAuthIndex map[string]CredentialSnapshot `json:"credentials_by_auth_index,omitempty"`
 
 	RequestsByDay  map[string]int64 `json:"requests_by_day"`
 	RequestsByHour map[string]int64 `json:"requests_by_hour"`
@@ -159,6 +170,13 @@ type ModelSnapshot struct {
 	Details       []RequestDetail `json:"details"`
 }
 
+type CredentialSnapshot struct {
+	TotalRequests int64      `json:"total_requests"`
+	SuccessCount  int64      `json:"success_count"`
+	FailureCount  int64      `json:"failure_count"`
+	Tokens        TokenStats `json:"tokens"`
+}
+
 var defaultRequestStatistics = NewRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
@@ -167,11 +185,13 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:                   make(map[string]*apiStats),
+		credentialsBySource:    make(map[string]*credentialStats),
+		credentialsByAuthIndex: make(map[string]*credentialStats),
+		requestsByDay:          make(map[string]int64),
+		requestsByHour:         make(map[int]int64),
+		tokensByDay:            make(map[string]int64),
+		tokensByHour:           make(map[int]int64),
 	}
 }
 
@@ -229,6 +249,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Tokens:    detail,
 		Failed:    failed,
 	})
+	s.updateCredentialStats(record.Source, record.AuthIndex, detail, failed)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -247,6 +268,65 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+}
+
+func (s *RequestStatistics) updateCredentialStats(source, authIndex string, tokens TokenStats, failed bool) {
+	if source = strings.TrimSpace(source); source != "" {
+		stats, ok := s.credentialsBySource[source]
+		if !ok {
+			stats = &credentialStats{}
+			s.credentialsBySource[source] = stats
+		}
+		applyCredentialStats(stats, tokens, failed)
+	}
+
+	if authIndex = strings.TrimSpace(authIndex); authIndex != "" {
+		stats, ok := s.credentialsByAuthIndex[authIndex]
+		if !ok {
+			stats = &credentialStats{}
+			s.credentialsByAuthIndex[authIndex] = stats
+		}
+		applyCredentialStats(stats, tokens, failed)
+	}
+}
+
+func applyCredentialStats(stats *credentialStats, tokens TokenStats, failed bool) {
+	if stats == nil {
+		return
+	}
+
+	tokens = normaliseTokenStats(tokens)
+	stats.TotalRequests++
+	if failed {
+		stats.FailureCount++
+	} else {
+		stats.SuccessCount++
+	}
+	stats.Tokens.InputTokens += tokens.InputTokens
+	stats.Tokens.OutputTokens += tokens.OutputTokens
+	stats.Tokens.ReasoningTokens += tokens.ReasoningTokens
+	stats.Tokens.CachedTokens += tokens.CachedTokens
+	stats.Tokens.TotalTokens += tokens.TotalTokens
+}
+
+func cloneCredentialSnapshots(items map[string]*credentialStats) map[string]CredentialSnapshot {
+	if len(items) == 0 {
+		return map[string]CredentialSnapshot{}
+	}
+
+	result := make(map[string]CredentialSnapshot, len(items))
+	for key, stats := range items {
+		if stats == nil {
+			continue
+		}
+		result[key] = CredentialSnapshot{
+			TotalRequests: stats.TotalRequests,
+			SuccessCount:  stats.SuccessCount,
+			FailureCount:  stats.FailureCount,
+			Tokens:        normaliseTokenStats(stats.Tokens),
+		}
+	}
+	return result
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -282,6 +362,9 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		}
 		result.APIs[apiName] = apiSnapshot
 	}
+
+	result.CredentialsBySource = cloneCredentialSnapshots(s.credentialsBySource)
+	result.CredentialsByAuthIndex = cloneCredentialSnapshots(s.credentialsByAuthIndex)
 
 	result.RequestsByDay = make(map[string]int64, len(s.requestsByDay))
 	for k, v := range s.requestsByDay {
@@ -394,6 +477,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.totalTokens += totalTokens
 
 	s.updateAPIStats(stats, modelName, detail)
+	s.updateCredentialStats(detail.Source, detail.AuthIndex, detail.Tokens, detail.Failed)
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()

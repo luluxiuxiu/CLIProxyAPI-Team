@@ -94,3 +94,63 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsSnapshotIncludesCredentialTokenAggregates(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "codex",
+		Model:       "gpt-5.3-codex",
+		Source:      "codex-user@example.com",
+		AuthIndex:   "auth-7",
+		RequestedAt: time.Date(2026, 3, 20, 13, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:     100,
+			OutputTokens:    40,
+			ReasoningTokens: 3,
+			CachedTokens:    10,
+			TotalTokens:     153,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "codex",
+		Model:       "gpt-5.3-codex",
+		Source:      "codex-user@example.com",
+		AuthIndex:   "auth-7",
+		RequestedAt: time.Date(2026, 3, 20, 13, 1, 0, 0, time.UTC),
+		Failed:      true,
+		Detail: coreusage.Detail{
+			InputTokens:  15,
+			OutputTokens: 5,
+			TotalTokens:  20,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	bySource, ok := snapshot.CredentialsBySource["codex-user@example.com"]
+	if !ok {
+		t.Fatal("expected credentials_by_source entry")
+	}
+	if bySource.TotalRequests != 2 || bySource.SuccessCount != 1 || bySource.FailureCount != 1 {
+		t.Fatalf("unexpected source aggregate: %+v", bySource)
+	}
+	if bySource.Tokens.InputTokens != 115 {
+		t.Fatalf("source input_tokens = %d, want 115", bySource.Tokens.InputTokens)
+	}
+	if bySource.Tokens.OutputTokens != 45 {
+		t.Fatalf("source output_tokens = %d, want 45", bySource.Tokens.OutputTokens)
+	}
+	if bySource.Tokens.CachedTokens != 10 {
+		t.Fatalf("source cached_tokens = %d, want 10", bySource.Tokens.CachedTokens)
+	}
+	if bySource.Tokens.TotalTokens != 173 {
+		t.Fatalf("source total_tokens = %d, want 173", bySource.Tokens.TotalTokens)
+	}
+
+	byAuthIndex, ok := snapshot.CredentialsByAuthIndex["auth-7"]
+	if !ok {
+		t.Fatal("expected credentials_by_auth_index entry")
+	}
+	if byAuthIndex.TotalRequests != bySource.TotalRequests || byAuthIndex.Tokens.TotalTokens != bySource.Tokens.TotalTokens {
+		t.Fatalf("unexpected auth_index aggregate: %+v", byAuthIndex)
+	}
+}
